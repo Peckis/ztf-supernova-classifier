@@ -297,7 +297,8 @@ def merge_manifest(new: pd.DataFrame, path: Path) -> pd.DataFrame:
 
 
 def fetch_one(oid: str, stamp_dir: Path, out_dir: Path, overwrite: bool,
-              first_detection: bool = False) -> tuple:
+              first_detection: bool = False,
+              known_p_sn: dict | None = None) -> tuple:
     """Stamp + baseline p_sn for one object. Returns (row, failure).
 
     Each call builds its own Alerce client: these run on worker threads and the
@@ -331,11 +332,18 @@ def fetch_one(oid: str, stamp_dir: Path, out_dir: Path, overwrite: bool,
         return None, (oid, f"{type(exc).__name__}: {exc}")
 
     failure = None
-    try:
-        p_sn, p_sn_version = fetch_p_sn(client, oid)
-    except Exception as exc:
-        failure = (oid, f"p_sn: {type(exc).__name__}: {exc}")
-        p_sn, p_sn_version = float("nan"), ""
+    # p_sn is a property of the object, not of which epoch's stamp we fetched,
+    # so a value from an earlier run is still valid -- and skipping the call
+    # removes a third of the requests on a re-fetch
+    cached = known_p_sn.get(oid) if known_p_sn else None
+    if cached is not None:
+        p_sn, p_sn_version = cached
+    else:
+        try:
+            p_sn, p_sn_version = fetch_p_sn(client, oid)
+        except Exception as exc:
+            failure = (oid, f"p_sn: {type(exc).__name__}: {exc}")
+            p_sn, p_sn_version = float("nan"), ""
 
     return {
         "oid": oid,
@@ -350,8 +358,8 @@ def fetch_one(oid: str, stamp_dir: Path, out_dir: Path, overwrite: bool,
 
 
 def fetch_many(oids, stamp_dir: Path, out_dir: Path, overwrite: bool,
-               workers: int, desc: str,
-               first_detection: bool = False) -> tuple[list, list]:
+               workers: int, desc: str, first_detection: bool = False,
+               known_p_sn: dict | None = None) -> tuple[list, list]:
     """Fetch a list of oids concurrently.
 
     Measured: a single request takes ~2.3s regardless of load, and 8 threads
@@ -363,7 +371,7 @@ def fetch_many(oids, stamp_dir: Path, out_dir: Path, overwrite: bool,
     rows, failures = [], []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(fetch_one, o, stamp_dir, out_dir, overwrite,
-                               first_detection): o
+                               first_detection, known_p_sn): o
                    for o in oids}
         bar = tqdm(as_completed(futures), total=len(futures), desc=desc,
                    bar_format=BAR, mininterval=2.0, miniters=10, unit="obj")
@@ -734,7 +742,8 @@ def build_unfiltered(mjd_start: float, mjd_end: float, n: int, out_dir: Path,
 def build_from_oids(oid_file: Path, n: int, out_dir: Path, name: str,
                     only_label: float | None = None, overwrite: bool = False,
                     seed: int = 0, workers: int = 8,
-                    first_detection: bool = False) -> pd.DataFrame:
+                    first_detection: bool = False,
+                    reuse_p_sn: Path | None = None) -> pd.DataFrame:
     """Fetch stamps for an explicit list of oids -- e.g. TNS-confirmed supernovae.
 
     This inverts the pipeline. Instead of asking ALeRCE which objects it thinks
@@ -758,9 +767,19 @@ def build_from_oids(oid_file: Path, n: int, out_dir: Path, name: str,
         wanted = wanted.sample(n, random_state=seed)
     print(f"{len(wanted)} oids to fetch from {oid_file}")
 
+    known = None
+    if reuse_p_sn and reuse_p_sn.exists():
+        prev = pd.read_csv(reuse_p_sn)
+        prev = prev[prev.p_sn.notna()]
+        known = {r.oid: (float(r.p_sn), str(r.p_sn_version))
+                 for r in prev.itertuples()}
+        print(f"reusing {len(known)} p_sn values from {reuse_p_sn.name} "
+              f"(saves one request per object)")
+
     rows, failures = fetch_many(wanted.oid, stamp_dir, out_dir, overwrite,
                                 workers, f"stamps[{name}]",
-                                first_detection=first_detection)
+                                first_detection=first_detection,
+                                known_p_sn=known)
     manifest = pd.DataFrame(rows)
     if not manifest.empty:
         path = out_dir / f"manifest_{name}.csv"
@@ -838,6 +857,12 @@ def main(argv=None) -> int:
                         help="suffix for the output manifest_<name>.csv")
     parser.add_argument("--only-label", type=float, metavar="N",
                         help="with --oids-from, keep only rows whose tns_label is N")
+    parser.add_argument("--reuse-p-sn", type=Path, metavar="CSV",
+                        help="take p_sn from an existing manifest instead of "
+                             "re-querying it. The baseline probability belongs "
+                             "to the object, not to the epoch we fetched, so an "
+                             "earlier value is still valid -- and this removes "
+                             "a third of the requests on a re-fetch.")
     parser.add_argument("--first-detection", action="store_true",
                         help="pin stamps to each object's FIRST detection, which "
                              "is the epoch ALeRCE's stamp_classifier scored. "
@@ -875,7 +900,8 @@ def main(argv=None) -> int:
                                    args.name, args.only_label,
                                    overwrite=args.overwrite,
                                    workers=args.workers,
-                                   first_detection=args.first_detection)
+                                   first_detection=args.first_detection,
+                                   reuse_p_sn=args.reuse_p_sn)
         return 0 if not manifest.empty else 1
 
     if args.hard_negatives:
