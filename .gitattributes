@@ -1,0 +1,7 @@
+# Shell scripts must keep LF endings. Checked out with CRLF on Windows and then
+# copied to the Ubuntu server, bash fails with a confusing "bad interpreter"
+# error on the shebang line.
+*.sh text eol=lf
+
+# Keep Python consistent across laptop and server too.
+*.py text eol=lf

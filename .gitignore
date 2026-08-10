@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+
+# fetched stamp data — re-creatable with fetch_data.py, don't commit
+data/
+*.npy
+*.pth
+
+# transfer archives and backups — hundreds of MB, and git history is forever
+data_laptop_backup/
+*.tar.gz
+*.zip
