@@ -32,10 +32,17 @@ torch.manual_seed(SEED)
 
 # ---------------------------------------------------------------- data
 
-def load_dataset():
-    """Combine TNS positives with stream and hard negatives into one array."""
+def load_dataset(positives="manifest_positives.csv"):
+    """Combine TNS positives with stream and hard negatives into one array.
+
+    `positives` selects which epoch of the positive stamps to use.
+    manifest_positives_first.csv pins them to each object's first detection --
+    the epoch ALeRCE's stamp_classifier actually scored. The default
+    manifest_positives.csv is mixed-epoch and gives us an unearned advantage,
+    since ~25% of those stamps come from the last detection, near peak.
+    """
     parts = []
-    pos = pd.read_csv(DATA / "manifest_positives.csv")
+    pos = pd.read_csv(DATA / positives)
     pos["label"], pos["source"] = 1, "tns"
     parts.append(pos)
 
@@ -228,9 +235,16 @@ def main():
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--no-augment", action="store_true")
+    parser.add_argument("--positives", default="manifest_positives.csv",
+                        help="which positive manifest to use; "
+                             "manifest_positives_first.csv pins stamps to the "
+                             "first detection, matching what ALeRCE scored")
+    parser.add_argument("--predictions", default="predictions.csv",
+                        help="where to write per-object predictions")
     args = parser.parse_args()
 
-    X, y, frame = load_dataset()
+    X, y, frame = load_dataset(args.positives)
+    print(f"positives from: {args.positives}")
     print(f"device: {device}")
     print(f"loaded {len(X)} stamps {X.shape}  |  {int(y.sum())} SN (TNS-confirmed) "
           f"/ {int((y == 0).sum())} not-SN (unfiltered stream)")
@@ -310,8 +324,8 @@ def main():
     out = frame.iloc[test_idx][keep].copy()
     out["label"] = truth
     out["p_model"] = prob
-    out.to_csv(DATA / "predictions.csv", index=False)
-    print(f"\nsaved model.pth and {DATA / 'predictions.csv'}")
+    out.to_csv(DATA / args.predictions, index=False)
+    print(f"\nsaved model.pth and {DATA / args.predictions}")
 
 
 if __name__ == "__main__":
