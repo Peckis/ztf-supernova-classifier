@@ -6,6 +6,9 @@ __pycache__/
 data/
 *.npy
 *.pth
+# ...except the deployed model. 664 KB, and versioning it is how a retrain
+# reaches the server: train on the laptop GPU, commit, git pull on the server.
+!model.pth
 
 # transfer archives and backups — hundreds of MB, and git history is forever
 data_laptop_backup/

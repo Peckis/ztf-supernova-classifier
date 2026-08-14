@@ -83,12 +83,21 @@ def normalise(X_train, X_test):
     construction. Train-only stats because computing them over both splits would
     leak test information. NaN -> 0 last, so missing pixels land on the channel
     mean instead of dragging it.
+
+    Returns the stats too: inference on new alerts must reuse the exact values
+    the model was trained with, or the network sees differently-scaled data than
+    it learned on. They are saved into the checkpoint for that reason.
     """
     X_train, X_test = np.arcsinh(X_train), np.arcsinh(X_test)
     mean = np.nanmean(X_train, axis=(0, 2, 3), keepdims=True)
     std = np.nanstd(X_train, axis=(0, 2, 3), keepdims=True)
     return (np.nan_to_num((X_train - mean) / std),
-            np.nan_to_num((X_test - mean) / std))
+            np.nan_to_num((X_test - mean) / std), mean, std)
+
+
+def apply_normalisation(X, mean, std):
+    """Normalise new data with saved statistics -- the inference-time path."""
+    return np.nan_to_num((np.arcsinh(X) - mean) / std)
 
 
 def augment(batch):
@@ -259,7 +268,7 @@ def main():
           f"/ {int((y == 0).sum())} not-SN (unfiltered stream)")
 
     train_idx, test_idx = split(len(X))
-    X_train, X_test = normalise(X[train_idx], X[test_idx])
+    X_train, X_test, norm_mean, norm_std = normalise(X[train_idx], X[test_idx])
     y_train, y_test = y[train_idx], y[test_idx]
 
     train_loader = DataLoader(
@@ -325,7 +334,17 @@ def main():
     print("Precision here is optimistic: this split is ~50/50, the real stream is")
     print("~0.2% supernovae, where a low false-positive rate matters far more.")
 
-    torch.save(model.state_dict(), "model.pth")
+    # save the normalisation with the weights: a model applied with different
+    # statistics than it was trained on is silently wrong, not obviously broken
+    torch.save({
+        "state_dict": model.state_dict(),
+        "norm_mean": norm_mean,
+        "norm_std": norm_std,
+        "positives": args.positives,
+        "negatives": args.negatives,
+        "threshold": threshold,
+        "test_auc": float(auc(prob, truth)),
+    }, "model.pth")
 
     keep = ["oid", "stamp_path", "p_sn"]
     for extra in ("source", "cat_class"):

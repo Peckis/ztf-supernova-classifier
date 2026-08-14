@@ -108,17 +108,23 @@ def iter_packets(tarball: Path):
     from fastavro import reader as avro_reader
 
     with tarfile.open(tarball, "r|gz") as tar:
-        for member in tar:
-            if not member.isfile() or not member.name.endswith(".avro"):
-                continue
-            handle = tar.extractfile(member)
-            if handle is None:
-                continue
-            try:
-                for packet in avro_reader(io.BytesIO(handle.read())):
-                    yield packet
-            except Exception:
-                continue
+        # a truncated archive (partial or interrupted download) raises when the
+        # stream runs out mid-member; stop cleanly and keep what we already read
+        try:
+            for member in tar:
+                if not member.isfile() or not member.name.endswith(".avro"):
+                    continue
+                handle = tar.extractfile(member)
+                if handle is None:
+                    continue
+                try:
+                    for packet in avro_reader(io.BytesIO(handle.read())):
+                        yield packet
+                except Exception:
+                    continue
+        except (tarfile.ReadError, EOFError, OSError) as exc:
+            print(f"  archive ended early ({type(exc).__name__}) -- "
+                  f"keeping what was read")
 
 
 def build(tarball: Path, n: int, out_dir: Path, name: str,
