@@ -79,6 +79,43 @@ def best_threshold(prob, y):
     return float(grid[int(np.argmax([f1(t) for t in grid]))])
 
 
+def reweighted_report(d, t_ours, t_theirs, unfiltered=DATA / "manifest_unfiltered.csv"):
+    """Re-mix the negative types to the proportions a real stream actually has.
+
+    This is the number that matters, and it can differ wildly from the raw one.
+    Hard negatives are deliberately ENRICHED for training -- they were 59% of
+    our test negatives while a genuine stream sample is only ~16% long-span.
+    Since the model was trained on those same hard negatives, leaving them
+    over-represented in the test set flatters exactly what we optimised for:
+    it once turned a 2.3x practical deficit into an apparent AUC win.
+    """
+    if not unfiltered.exists() or "source" not in d.columns:
+        return
+    u = pd.read_csv(unfiltered)
+    if "lastmjd" not in u.columns:
+        return
+    long_frac = float(((u.lastmjd - u.firstmjd) > 365).mean())
+
+    neg = d[d.label == 0]
+    if not {"stream", "hard"} <= set(neg.source.unique()):
+        return
+
+    print(f"\n--- REWEIGHTED to the real stream mix "
+          f"({1-long_frac:.0%} stream-like / {long_frac:.0%} long-span) ---")
+    print("    (test negatives are "
+          f"{(neg.source == 'hard').mean():.0%} hard, which is not the real mix)")
+    for name, col, t in [("our CNN", "p_model", t_ours),
+                         ("ALeRCE", "p_sn", t_theirs)]:
+        fp_stream = float((neg.loc[neg.source == "stream", col] >= t).mean())
+        fp_hard = float((neg.loc[neg.source == "hard", col] >= t).mean())
+        fpr = (1 - long_frac) * fp_stream + long_frac * fp_hard
+        recall, _, _ = rates(d[col].to_numpy(), d.label.to_numpy(), t)
+        prec = BASE_RATE * recall / (BASE_RATE * recall + (1 - BASE_RATE) * fpr)
+        print(f"  {name:<10} FPR={fpr:>6.2%}  recall={recall:.3f}  "
+              f"precision@{BASE_RATE:.1%}={prec:>5.1%}  "
+              f"({fpr*99800/max(recall*200, 1):>5.1f} false per real SN)")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--predictions", type=Path, default=DATA / "predictions.csv")
@@ -140,6 +177,7 @@ def main():
             fp_theirs = (g.p_sn >= t_theirs).mean()
             print(f"  {src:<8} n={len(g):>5}  ours={fp_ours:>6.1%}  "
                   f"ALeRCE={fp_theirs:>6.1%}")
+        reweighted_report(d, t_ours, t_theirs)
 
     print("\nCaveats that belong in any write-up of these numbers:")
     print("  * Positives are TNS-CONFIRMED supernovae, so both models are scored")

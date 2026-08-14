@@ -32,7 +32,11 @@ torch.manual_seed(SEED)
 
 # ---------------------------------------------------------------- data
 
-def load_dataset(positives="manifest_positives.csv"):
+DEFAULT_NEGATIVES = ("manifest_unfiltered.csv", "manifest_hard_negatives.csv")
+
+
+def load_dataset(positives="manifest_positives.csv",
+                 negatives=DEFAULT_NEGATIVES):
     """Combine TNS positives with stream and hard negatives into one array.
 
     `positives` selects which epoch of the positive stamps to use.
@@ -46,13 +50,15 @@ def load_dataset(positives="manifest_positives.csv"):
     pos["label"], pos["source"] = 1, "tns"
     parts.append(pos)
 
-    for name, source in [("manifest_unfiltered.csv", "stream"),
-                         ("manifest_hard_negatives.csv", "hard")]:
+    for name in negatives:
         path = DATA / name
-        if path.exists():
-            neg = pd.read_csv(path)
-            neg["label"], neg["source"] = 0, source
-            parts.append(neg)
+        if not path.exists():
+            print(f"  (skipping missing {name})")
+            continue
+        neg = pd.read_csv(path)
+        neg["label"] = 0
+        neg["source"] = "hard" if "hard" in name else "stream"
+        parts.append(neg)
 
     frame = pd.concat(parts, ignore_index=True).drop_duplicates("oid")
     frame = frame[frame.stamp_path.map(lambda s: (DATA / s).exists())]
@@ -239,12 +245,15 @@ def main():
                         help="which positive manifest to use; "
                              "manifest_positives_first.csv pins stamps to the "
                              "first detection, matching what ALeRCE scored")
+    parser.add_argument("--negatives", nargs="+", default=list(DEFAULT_NEGATIVES),
+                        help="negative manifests to combine")
     parser.add_argument("--predictions", default="predictions.csv",
                         help="where to write per-object predictions")
     args = parser.parse_args()
 
-    X, y, frame = load_dataset(args.positives)
-    print(f"positives from: {args.positives}")
+    X, y, frame = load_dataset(args.positives, args.negatives)
+    print(f"positives: {args.positives}")
+    print(f"negatives: {', '.join(args.negatives)}")
     print(f"device: {device}")
     print(f"loaded {len(X)} stamps {X.shape}  |  {int(y.sum())} SN (TNS-confirmed) "
           f"/ {int((y == 0).sum())} not-SN (unfiltered stream)")
@@ -319,8 +328,9 @@ def main():
     torch.save(model.state_dict(), "model.pth")
 
     keep = ["oid", "stamp_path", "p_sn"]
-    if "source" in frame.columns:
-        keep.append("source")
+    for extra in ("source", "cat_class"):
+        if extra in frame.columns:
+            keep.append(extra)
     out = frame.iloc[test_idx][keep].copy()
     out["label"] = truth
     out["p_model"] = prob

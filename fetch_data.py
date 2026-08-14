@@ -639,10 +639,19 @@ def query_hard_negatives(client: Alerce, n: int, min_span: float = 365.0,
 
 
 def build_hard_negatives(n: int, out_dir: Path, overwrite: bool = False,
-                         workers: int = 8, min_span: float = 365.0) -> pd.DataFrame:
-    """Fetch long-span objects as hard negatives, excluding any confirmed SN."""
+                         workers: int = 8, min_span: float = 365.0,
+                         first_detection: bool = False) -> pd.DataFrame:
+    """Fetch long-span objects as hard negatives, excluding any confirmed SN.
+
+    Use first_detection to match the positives. The positives are pinned to
+    their first alert, which for a supernova is typically its faintest epoch;
+    if the negatives came from arbitrary epochs -- often brighter, since a
+    long-span variable gets sampled anywhere in its cycle -- the model could
+    learn "faint means supernova". That would be a fresh shortcut replacing the
+    one the epoch fix just removed.
+    """
     client = Alerce()
-    stamp_dir = out_dir / "stamps"
+    stamp_dir = out_dir / ("stamps_first" if first_detection else "stamps")
     stamp_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"querying up to {n} objects with detection span > {min_span:.0f}d ...")
@@ -664,7 +673,8 @@ def build_hard_negatives(n: int, out_dir: Path, overwrite: bool = False,
 
     print(f"got {len(candidates)}, downloading stamps")
     rows, failures = fetch_many(candidates.oid, stamp_dir, out_dir, overwrite,
-                                workers, "stamps[hard-neg]")
+                                workers, "stamps[hard-neg]",
+                                first_detection=first_detection)
 
     manifest = pd.DataFrame(rows)
     if not manifest.empty:
@@ -672,7 +682,8 @@ def build_hard_negatives(n: int, out_dir: Path, overwrite: bool = False,
                            "firstmjd", "lastmjd"]].rename(
             columns={"meanra": "ra", "meandec": "dec"})
         manifest = manifest.merge(meta, on="oid", how="left")
-        path = out_dir / "manifest_hard_negatives.csv"
+        path = out_dir / ("manifest_hard_negatives_first.csv" if first_detection
+                          else "manifest_hard_negatives.csv")
         manifest = merge_manifest(manifest, path)
         manifest.to_csv(path, index=False)
         span = manifest.lastmjd - manifest.firstmjd
@@ -908,7 +919,8 @@ def main(argv=None) -> int:
         manifest = build_hard_negatives(args.n, args.out,
                                         overwrite=args.overwrite,
                                         workers=args.workers,
-                                        min_span=args.min_span)
+                                        min_span=args.min_span,
+                                        first_detection=args.first_detection)
         return 0 if not manifest.empty else 1
 
     if args.unfiltered:
