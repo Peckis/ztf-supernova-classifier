@@ -122,7 +122,7 @@ def score_batch(model, arrays, mean, std, device) -> np.ndarray:
 
 def ingest(tarball: Path, night: str, model, mean, std, version: str,
            device: str, keep_stamps: int, batch_size: int,
-           dry_run: bool) -> dict:
+           dry_run: bool, max_ndethist: int = 2) -> dict:
     stamp_dir = DATA / "stream_stamps" / night
     conn = None if dry_run else connect()
 
@@ -149,14 +149,28 @@ def ingest(tarball: Path, night: str, model, mean, std, version: str,
                     heapq.heapreplace(best, item)
         pending.clear()
 
+    n_skipped = 0
     bar = tqdm(desc=f"scoring[{night}]", unit="alert")
     for packet in iter_packets(tarball):
+        c = packet.get("candidate", {})
+
+        # Only score alerts from objects the model was trained to judge.
+        # We trained on FIRST-detection stamps, where ndethist is ~1. Two thirds
+        # of the stream is repeat detections of long-known objects (ndethist in
+        # the hundreds), which is far outside that distribution -- and it shows:
+        # the model gave 0.9988 to the 367th detection of a known AGN. An early
+        # classifier's job is new objects, so anything already well-known is
+        # skipped rather than scored badly.
+        nd = c.get("ndethist")
+        if max_ndethist and nd is not None and nd > max_ndethist:
+            n_skipped += 1
+            continue
+
         try:
             arr = packet_to_stamp(packet)
         except Exception:
             n_unusable += 1
             continue
-        c = packet.get("candidate", {})
         pending.append(({
             "candid": packet.get("candid"),
             "oid": packet.get("objectId"),
@@ -204,7 +218,7 @@ def ingest(tarball: Path, night: str, model, mean, std, version: str,
 
     scores = np.array([r["p_model"] for r in rows]) if rows else np.array([])
     return {
-        "n_alerts": n_alerts, "n_unusable": n_unusable,
+        "n_alerts": n_alerts, "n_unusable": n_unusable, "n_skipped": n_skipped,
         "n_stamps_kept": len(kept), "seconds": time.perf_counter() - started,
         "scores": scores,
     }
@@ -219,6 +233,12 @@ def main(argv=None) -> int:
                         help="how many top-scoring alerts keep their stamps "
                              "(0 disables). ~47 KB each.")
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--max-ndethist", type=int, default=2,
+                        help="skip alerts whose object already has more than "
+                             "this many prior detections (0 scores everything). "
+                             "The model was trained on first detections; repeat "
+                             "alerts for long-known objects are out of "
+                             "distribution and score badly.")
     parser.add_argument("--keep-tarball", action="store_true")
     parser.add_argument("--dry-run", action="store_true",
                         help="score but write nothing")
@@ -246,11 +266,14 @@ def main(argv=None) -> int:
         args.date, DATA / "archive" / f"ztf_public_{args.date}.tar.gz")
 
     stats = ingest(tarball, night, model, mean, std, version, device,
-                   args.keep_stamps, args.batch_size, args.dry_run)
+                   args.keep_stamps, args.batch_size, args.dry_run,
+                   args.max_ndethist)
 
     s = stats["scores"]
-    print(f"\nnight {night}: {stats['n_alerts']:,} alerts scored "
-          f"({stats['n_unusable']} unusable) in {stats['seconds']/60:.1f} min")
+    print(f"\nnight {night}: {stats['n_alerts']:,} alerts scored, "
+          f"{stats['n_skipped']:,} skipped as already-known "
+          f"(ndethist>{args.max_ndethist}), {stats['n_unusable']} unusable, "
+          f"in {stats['seconds']/60:.1f} min")
     if len(s):
         print(f"  p_model: median {np.median(s):.4f}   "
               f">=0.5: {(s >= 0.5).sum():,} ({(s >= 0.5).mean():.2%})   "

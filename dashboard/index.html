@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8"><title>ZTF supernova classifier</title>
+<style>
+ body{font:16px/1.6 system-ui,sans-serif;max-width:56rem;margin:3rem auto;
+      padding:0 1.5rem;color:#1a1a1a}
+ h1{font-size:1.6rem;margin-bottom:.2rem} .sub{color:#666;margin-top:0}
+ img{max-width:100%;border:1px solid #ddd;border-radius:6px}
+ .stat{display:inline-block;margin:0 2rem .5rem 0}
+ .stat b{display:block;font-size:1.5rem} .stat span{color:#666;font-size:.85rem}
+ .caveat{background:#fff8e6;border-left:3px solid #e0a800;padding:.8rem 1rem;
+          font-size:.9rem}
+</style>
+<h1>Continually-learning supernova classifier</h1>
+<p class="sub">A CNN scores every ZTF alert as it arrives; TNS spectroscopy
+confirms the truth weeks later; the model is measured against the ALeRCE
+broker's own classifier on the same objects.</p>
+
+<div>
+ <div class="stat"><b>75</b><span>alerts scored</span></div>
+ <div class="stat"><b>1</b><span>nights ingested</span></div>
+ <div class="stat"><b>0</b><span>TNS-confirmed</span></div>
+ <div class="stat"><b>—</b><span>AUC vs baseline —</span></div>
+</div>
+
+<h2>Performance over time</h2>
+<img src="accuracy.svg" alt="AUC over time versus the ALeRCE baseline">
+<p class="sub">Cumulative over every confirmed object to date. The bars show how
+many labels each point rests on.</p>
+
+<h2>Inside the model</h2>
+<img src="highlights.png" alt="Example stamps the model classified">
+<p class="sub">Errors first: a gallery of successes would say nothing the AUC
+does not.</p>
+
+<p class="caveat"><b>Read with care.</b> Objects are only labelled if someone
+thought them worth a spectrum, so neither model can be measured on supernovae
+the whole community missed. Alerts from objects with more than two prior
+detections are not scored -- the model is an early classifier and they fall
+outside what it was trained on.</p>
+<p class="sub">Updated 2026-08-15 07:34 UTC.</p>

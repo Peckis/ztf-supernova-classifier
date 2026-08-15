@@ -1,0 +1,9 @@
+{
+  "n_alerts": 75,
+  "n_nights": 1,
+  "n_labelled": 0,
+  "model_auc": null,
+  "baseline_auc": null,
+  "history": [],
+  "updated": "2026-08-15 07:34 UTC"
+}
