@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import io
+import os
 import random
 import sys
 import tarfile
@@ -46,12 +47,42 @@ CUTOUTS = ("cutoutScience", "cutoutTemplate", "cutoutDifference")
 
 
 def download(date: str, dest: Path) -> Path:
-    """Stream the nightly tarball to disk, resuming is not supported so verify."""
+    """Stream the nightly tarball to disk, atomically.
+
+    Downloads to a .part file and renames only after the byte count matches
+    Content-Length. This matters more than it looks: a tarball truncated by a
+    power cut is still a *readable* gzip stream, so iter_packets would parse the
+    first fraction of the night, stop cleanly at the damage, and ingest_night
+    would record the night as done. Gap detection would then never revisit it --
+    silent, permanent data loss. A file only gets its final name once it is
+    known to be whole.
+    """
     url = f"{ARCHIVE}/ztf_public_{date}.tar.gz"
     dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_suffix(dest.suffix + ".part")
+
     if dest.exists():
-        print(f"{dest} already present ({dest.stat().st_size / 1e9:.1f} GB), reusing")
-        return dest
+        # Trust a cached file only if it is the right size. A partial download
+        # from before the .part scheme -- or any truncation -- is still valid
+        # gzip, so it would be parsed as a short but "complete" night.
+        have = dest.stat().st_size
+        try:
+            expect = int(requests.head(url, timeout=60).headers
+                         .get("content-length", 0))
+        except Exception:
+            expect = 0
+        if expect and have != expect:
+            print(f"cached {dest.name} is {have:,} bytes but the archive says "
+                  f"{expect:,} -- discarding and re-downloading")
+            dest.unlink()
+        else:
+            print(f"{dest} already present ({have / 1e9:.1f} GB), reusing")
+            return dest
+    if part.exists():
+        # the archive does not support range requests, so there is nothing to
+        # resume from -- start over rather than build on an unknown prefix
+        print(f"discarding incomplete {part.name} from an interrupted run")
+        part.unlink()
 
     print(f"downloading {url}")
     with requests.get(url, stream=True, timeout=120) as r:
@@ -60,11 +91,22 @@ def download(date: str, dest: Path) -> Path:
                      "Check the date exists at https://ztf.uw.edu/alerts/public/")
         total = int(r.headers.get("content-length", 0))
         bar = tqdm(total=total, unit="B", unit_scale=True, desc="tarball", disable=None)
-        with open(dest, "wb") as f:
+        written = 0
+        with open(part, "wb") as f:
             for chunk in r.iter_content(chunk_size=1 << 20):
                 f.write(chunk)
+                written += len(chunk)
                 bar.update(len(chunk))
+            f.flush()
+            os.fsync(f.fileno())   # survive a power cut, not just a crash
         bar.close()
+
+    if total and written != total:
+        part.unlink(missing_ok=True)
+        sys.exit(f"download incomplete: got {written:,} of {total:,} bytes. "
+                 f"Nothing was ingested; the next run will retry this night.")
+
+    part.replace(dest)             # atomic on the same filesystem
     print(f"wrote {dest} ({dest.stat().st_size / 1e9:.1f} GB)")
     return dest
 

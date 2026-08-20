@@ -88,9 +88,19 @@ CREATE TABLE IF NOT EXISTS runs (
 
 
 def connect(path: Path = DB_PATH) -> sqlite3.Connection:
-    """Open the pipeline database, creating it on first use."""
+    """Open the pipeline database, creating it on first use.
+
+    WAL is worth the one line. It lets status.py read while a night is being
+    written instead of hitting SQLITE_BUSY, and it recovers a half-finished
+    transaction from its own log after a hard power cut. synchronous=NORMAL is
+    the right pairing: under WAL it still survives an OS crash or power loss,
+    and the alternative costs an fsync per commit for a durability guarantee we
+    do not need -- a lost final commit just means the night gets re-ingested.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
     return conn
 
