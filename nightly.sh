@@ -145,6 +145,20 @@ else
   status=1
 fi
 
+# --- 3b. publish it, if a target repo is configured ---------------------
+# Optional: only runs once publish_dashboard.sh --setup has been done. A
+# publish failure is a WARNING, not an error -- the pipeline itself is fine and
+# the next run will push the same content again.
+if [ -d "$REPO/.publish" ] || [ -n "${PUBLISH_REPO:-}" ]; then
+  echo "-- publish"
+  if bash publish_dashboard.sh; then
+    event OK publish "pushed"
+  else
+    echo "   publish failed"
+    event WARN publish "push failed (dashboard is still generated locally)"
+  fi
+fi
+
 # --- 4. tell the human when a retrain is worth doing --------------------
 # Retraining is a laptop job (the server has no usable GPU) and is only worth
 # doing when enough new truth has arrived to move the model.

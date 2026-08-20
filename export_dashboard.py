@@ -224,52 +224,110 @@ def write_highlights(d: pd.DataFrame, data_dir: Path, path: Path, per_row: int):
 
 
 INDEX = """<!doctype html>
-<meta charset="utf-8"><title>ZTF supernova classifier</title>
+<html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZTF supernova classifier — live</title>
+<!-- The pipeline runs once a night, so refreshing every 30 min is plenty to
+     keep an open tab current without hammering the host. -->
+<meta http-equiv="refresh" content="1800">
 <style>
- body{{font:16px/1.6 system-ui,sans-serif;max-width:56rem;margin:3rem auto;
-      padding:0 1.5rem;color:#1a1a1a}}
- h1{{font-size:1.6rem;margin-bottom:.2rem}} .sub{{color:#666;margin-top:0}}
- img{{max-width:100%;border:1px solid #ddd;border-radius:6px}}
- .stat{{display:inline-block;margin:0 2rem .5rem 0}}
- .stat b{{display:block;font-size:1.5rem}} .stat span{{color:#666;font-size:.85rem}}
- .caveat{{background:#fff8e6;border-left:3px solid #e0a800;padding:.8rem 1rem;
-          font-size:.9rem}}
+ :root{{--fg:#16181d;--muted:#6b7280;--line:#e5e7eb;--bg:#fff;--card:#f9fafb;
+        --ok:#15803d;--okbg:#dcfce7;--warn:#b45309;--warnbg:#fef3c7;
+        --bad:#b91c1c;--badbg:#fee2e2}}
+ @media(prefers-color-scheme:dark){{
+   :root{{--fg:#e5e7eb;--muted:#9ca3af;--line:#374151;--bg:#0f1115;--card:#171a21;
+          --ok:#4ade80;--okbg:#14321f;--warn:#fbbf24;--warnbg:#3a2c0a;
+          --bad:#f87171;--badbg:#3b1414}}
+   img{{filter:brightness(.92)}}
+ }}
+ *{{box-sizing:border-box}}
+ body{{font:16px/1.65 system-ui,-apple-system,Segoe UI,sans-serif;max-width:62rem;
+      margin:0 auto;padding:2.5rem 1.5rem 4rem;color:var(--fg);background:var(--bg)}}
+ h1{{font-size:1.75rem;margin:0 0 .3rem}}
+ h2{{font-size:1.1rem;margin:2.5rem 0 .6rem;padding-bottom:.35rem;
+     border-bottom:1px solid var(--line)}}
+ .sub{{color:var(--muted);margin:.2rem 0 0}}
+ .badge{{display:inline-block;padding:.15rem .6rem;border-radius:99px;
+         font-size:.8rem;font-weight:600;vertical-align:middle}}
+ .ok{{background:var(--okbg);color:var(--ok)}}
+ .warn{{background:var(--warnbg);color:var(--warn)}}
+ .bad{{background:var(--badbg);color:var(--bad)}}
+ .stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));
+         gap:.75rem;margin:1.5rem 0}}
+ .stat{{background:var(--card);border:1px solid var(--line);border-radius:8px;
+        padding:.8rem 1rem}}
+ .stat b{{display:block;font-size:1.5rem;line-height:1.2}}
+ .stat span{{color:var(--muted);font-size:.8rem}}
+ img{{max-width:100%;border:1px solid var(--line);border-radius:8px;
+      background:#fff}}
+ .caveat{{background:var(--card);border-left:3px solid var(--warn);
+          padding:.9rem 1.1rem;font-size:.9rem;border-radius:0 6px 6px 0}}
+ footer{{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);
+         color:var(--muted);font-size:.85rem}}
+ a{{color:inherit}}
 </style>
-<h1>Continually-learning supernova classifier</h1>
-<p class="sub">A CNN scores every ZTF alert as it arrives; TNS spectroscopy
-confirms the truth weeks later; the model is measured against the ALeRCE
-broker's own classifier on the same objects.</p>
 
-<div>
+<h1>Continually-learning supernova classifier
+  <span class="badge {status_class}">{status_text}</span></h1>
+<p class="sub">A CNN scores every alert from the ZTF sky survey as it arrives.
+Weeks later, spectroscopy from the Transient Name Server confirms what those
+objects actually were — and the model is scored against the ALeRCE broker's own
+classifier on exactly the same images.</p>
+
+<div class="stats">
  <div class="stat"><b>{n_alerts:,}</b><span>alerts scored</span></div>
  <div class="stat"><b>{n_nights}</b><span>nights ingested</span></div>
- <div class="stat"><b>{n_labelled:,}</b><span>TNS-confirmed</span></div>
- <div class="stat"><b>{auc_txt}</b><span>AUC vs baseline {base_txt}</span></div>
+ <div class="stat"><b>{n_labelled:,}</b><span>confirmed by spectroscopy</span></div>
+ <div class="stat"><b>{auc_txt}</b><span>our AUC</span></div>
+ <div class="stat"><b>{base_txt}</b><span>ALeRCE AUC</span></div>
 </div>
 
 <h2>Performance over time</h2>
 <img src="accuracy.svg" alt="AUC over time versus the ALeRCE baseline">
-<p class="sub">Cumulative over every confirmed object to date. The bars show how
-many labels each point rests on.</p>
+<p class="sub">Cumulative over every confirmed object to date, so the curve
+tightens as evidence accrues rather than jittering on three-object nights. The
+bars show how many labels each point rests on.</p>
 
-<h2>Inside the model</h2>
-<img src="highlights.png" alt="Example stamps the model classified">
-<p class="sub">Errors first: a gallery of successes would say nothing the AUC
-does not.</p>
+{gallery}
+<h2>How to read these numbers</h2>
+<p class="caveat"><b>Two honest caveats.</b> Objects only get labelled if someone
+judged them worth a spectrum, so neither model can be measured on supernovae the
+whole community missed. And alerts from objects with more than two prior
+detections are deliberately not scored — this is an <em>early</em> classifier,
+and repeat detections of long-known variables fall outside what it was trained
+on.</p>
 
-<p class="caveat"><b>Read with care.</b> Objects are only labelled if someone
-thought them worth a spectrum, so neither model can be measured on supernovae
-the whole community missed. Alerts from objects with more than two prior
-detections are not scored -- the model is an early classifier and they fall
-outside what it was trained on.</p>
-<p class="sub">Updated {updated}.</p>
+<footer>
+ Updated {updated} · pipeline {status_text_lower} · rebuilt nightly
+ · <a href="{repo_url}">source and methodology on GitHub</a>
+</footer>
+</html>
 """
+
+
+def pipeline_health() -> tuple[str, str]:
+    """Reuse status.py's verdict rather than reimplementing freshness checks."""
+    try:
+        import status
+        events = status.parse_events(14)
+        verdict = max((c[0] for c in (status.check_scheduler(events),
+                                      status.check_last_outcome(events),
+                                      status.check_errors(events))),
+                      key=lambda v: status.RANK[v])
+    except Exception:
+        return "unknown", "warn"
+    return {"OK": ("running", "ok"), "DEGRADED": ("running", "ok"),
+            "FAILING": ("degraded", "warn"),
+            "STALLED": ("stalled", "bad")}.get(verdict, ("unknown", "warn"))
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=DB_PATH)
     parser.add_argument("--out", type=Path, default=Path("dashboard"))
+    parser.add_argument("--repo-url",
+                        default="https://github.com/Peckis/ztf-supernova-classifier",
+                        help="linked from the page footer")
     parser.add_argument("--per-row", type=int, default=4,
                         help="example objects per highlight row")
     args = parser.parse_args()
@@ -306,12 +364,33 @@ def main(argv=None) -> int:
     made = write_highlights(d, args.db.parent, args.out / "highlights.png",
                             args.per_row)
 
+    # Show pipeline health on the public page. A visitor seeing "running" with a
+    # recent timestamp is what makes this read as live rather than as a snapshot
+    # someone committed once and forgot.
+    health, health_class = pipeline_health()
+    payload["status"] = health
+
+    # Only reference the gallery once it exists. Before the first labels arrive
+    # a hard-coded <img> would render as a broken-image icon on a public page.
+    gallery = ("""<h2>What the model actually saw</h2>
+<img src="highlights.png" alt="Example stamps the model classified">
+<p class="sub">Errors first — a gallery of successes would say nothing the AUC
+does not. Each object shows the three channels the network receives: the new
+image, the reference, and their difference.</p>""" if made else
+        """<h2>What the model actually saw</h2>
+<p class="sub">Waiting for the first spectroscopic confirmations. Objects are
+scored the night they arrive; the Transient Name Server publishes what they
+actually were over the following weeks, and the gallery appears once there is
+truth to compare against.</p>""")
+
     (args.out / "index.html").write_text(INDEX.format(
         n_alerts=payload["n_alerts"], n_nights=payload["n_nights"],
         n_labelled=payload["n_labelled"],
         auc_txt="—" if payload["model_auc"] is None else f"{payload['model_auc']:.3f}",
         base_txt="—" if payload["baseline_auc"] is None else f"{payload['baseline_auc']:.3f}",
-        updated=payload["updated"]), encoding="utf-8")
+        updated=payload["updated"], status_text=health,
+        status_text_lower=health.lower(), status_class=health_class,
+        repo_url=args.repo_url, gallery=gallery), encoding="utf-8")
 
     print(f"wrote {args.out}/  (accuracy.json, accuracy.svg, index.html"
           f"{', highlights.png' if made else ''})")
