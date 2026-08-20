@@ -32,10 +32,21 @@ KEEP_LOGS_DAYS="${KEEP_LOGS_DAYS:-60}"
 
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/nightly-$(date -u +%Y%m%d).log"
+EVENTS="$LOG_DIR/events.tsv"
 exec >>"$LOG" 2>&1
+
+# Structured event stream for status.py. Tab-separated rather than JSON so the
+# shell can append a line without spawning anything or escaping quotes; the
+# message has tabs and newlines stripped so one event is always one line.
+#   event LEVEL STAGE MESSAGE       LEVEL in OK|WARN|ERROR
+event() {
+  printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" \
+    "$(printf '%s' "$3" | tr '\t\n' '  ')" >>"$EVENTS"
+}
 
 echo "================================================================"
 echo "nightly run $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+event OK run "started"
 echo "================================================================"
 
 # --- only one instance at a time ---------------------------------------
@@ -46,6 +57,7 @@ if command -v flock >/dev/null 2>&1; then
   exec 9>"$REPO/.nightly.lock"
   if ! flock -n 9; then
     echo "another nightly run is still going; exiting"
+    event WARN run "skipped, previous run still going"
     exit 0
   fi
 else
@@ -60,6 +72,7 @@ for v in TNS_BOT_ID TNS_BOT_NAME TNS_API_KEY; do
   if [ -z "${!v:-}" ]; then
     echo "WARNING: $v not set (copy .env.example to .env) -- "
     echo "         ingest will still run, labelling will be skipped"
+    event WARN config "$v not set; labelling skipped"
     NO_TNS=1
   fi
 done
@@ -93,10 +106,12 @@ else
     echo "-- ingest $night"
     if "$PY" -u ingest_night.py --date "$night"; then
       echo "   ok"
+      event OK ingest "$night ingested"
     else
       # An empty night (weather) is published as a 74-byte placeholder and is a
       # perfectly normal outcome, so this is a warning rather than a failure.
       echo "   ingest failed or night was empty; continuing"
+      event WARN ingest "$night failed or empty (weather nights are normal)"
     fi
   done
 fi
@@ -108,8 +123,14 @@ else
   for back in $(seq 1 "$LOOKBACK_DAYS"); do
     day=$(date -u -d "$back days ago" +%Y%m%d)
     echo "-- labels from TNS delta $day"
-    "$PY" -u label_from_tns.py --delta "$day" || \
+    if "$PY" -u label_from_tns.py --delta "$day"; then
+      event OK labels "delta $day applied"
+    else
+      # A delta that is not published yet, or has aged out of TNS's two-week
+      # window, is expected rather than broken -- the replay covers it.
       echo "   delta $day unavailable; continuing"
+      event WARN labels "delta $day unavailable"
+    fi
   done
 fi
 
@@ -117,8 +138,10 @@ fi
 echo "-- dashboard"
 if "$PY" -u export_dashboard.py; then
   echo "   ok"
+  event OK dashboard "rebuilt"
 else
   echo "   dashboard export FAILED"
+  event ERROR dashboard "export failed"
   status=1
 fi
 
@@ -141,5 +164,6 @@ EOF
 
 find "$LOG_DIR" -name 'nightly-*.log' -mtime +"$KEEP_LOGS_DAYS" -delete 2>/dev/null
 
+if [ "$status" = 0 ]; then event OK run "finished cleanly"; else event ERROR run "finished with status $status"; fi
 echo "finished $(date -u +'%H:%M:%S UTC') with status $status"
 exit $status
