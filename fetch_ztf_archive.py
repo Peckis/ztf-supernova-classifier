@@ -59,7 +59,7 @@ def download(date: str, dest: Path) -> Path:
             sys.exit(f"archive returned {r.status_code} for {url}\n"
                      "Check the date exists at https://ztf.uw.edu/alerts/public/")
         total = int(r.headers.get("content-length", 0))
-        bar = tqdm(total=total, unit="B", unit_scale=True, desc="tarball")
+        bar = tqdm(total=total, unit="B", unit_scale=True, desc="tarball", disable=None)
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=1 << 20):
                 f.write(chunk)
@@ -134,7 +134,7 @@ def build(tarball: Path, n: int, out_dir: Path, name: str,
     rng = random.Random(seed)
 
     rows, failures, seen_oids = [], 0, set()
-    bar = tqdm(total=n, desc=f"alerts[{name}]", unit="obj")
+    bar = tqdm(total=n, desc=f"alerts[{name}]", unit="obj", disable=None)
 
     for packet in iter_packets(tarball):
         if len(rows) >= n:

@@ -150,7 +150,7 @@ def ingest(tarball: Path, night: str, model, mean, std, version: str,
         pending.clear()
 
     n_skipped = 0
-    bar = tqdm(desc=f"scoring[{night}]", unit="alert")
+    bar = tqdm(desc=f"scoring[{night}]", unit="alert", disable=None)
     for packet in iter_packets(tarball):
         c = packet.get("candidate", {})
 

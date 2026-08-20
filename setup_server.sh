@@ -61,16 +61,22 @@ fi
 cat <<'EOF'
 
 === ready ===
-Backfill a few nights (downloads dominate; run it overnight):
-  nohup .venv/bin/python -u backfill_nights.py --nights 8 > logs/backfill.log 2>&1 &
-  tail -f logs/backfill.log
+1. Credentials (cron does not read ~/.profile, so they go in a file):
+     cp .env.example .env && $EDITOR .env
 
-Then attach ground truth and build the dashboard:
-  .venv/bin/python label_from_tns.py --full
-  .venv/bin/python export_dashboard.py
+2. Backfill some past nights, so the dashboard has real numbers now instead of
+   in several months. Downloads dominate; run it overnight:
+     nohup .venv/bin/python -u backfill_nights.py --nights 8 > logs/backfill.log 2>&1 &
+     tail -f logs/backfill.log
 
-For the ongoing nightly loop, add to crontab -e (ZTF publishes ~07:10 UTC):
-  30 8 * * * cd ~/ztf && .venv/bin/python -u ingest_night.py --date $(date -u -d yesterday +\%Y\%m\%d) >> logs/ingest.log 2>&1
-  0  9 * * * cd ~/ztf && .venv/bin/python -u label_from_tns.py --delta $(date -u -d yesterday +\%Y\%m\%d) >> logs/label.log 2>&1
-  30 9 * * * cd ~/ztf && .venv/bin/python -u export_dashboard.py >> logs/dash.log 2>&1
+3. Turn on the nightly loop. One entry; nightly.sh sequences
+   ingest -> label -> dashboard itself and recovers its own gaps:
+     bash install_cron.sh
+
+   Try it once by hand first:
+     bash nightly.sh && tail -40 logs/nightly-$(date -u +%Y%m%d).log
+
+After that nothing needs a human except retraining, which is a laptop job (the
+server has no usable GPU). nightly.sh tells you in the log when enough new
+labels have accumulated to make one worthwhile.
 EOF

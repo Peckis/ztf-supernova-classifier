@@ -67,13 +67,21 @@ def apply_labels(conn: sqlite3.Connection, rows: pd.DataFrame) -> dict:
     prev = pd.read_sql(
         "SELECT oid, tns_name, tns_type FROM alerts GROUP BY oid", conn
     ).set_index("oid")
-    existing = prev.tns_type.to_dict()
-    existing_name = prev.tns_name.to_dict()
+
+    def clean(v):
+        """SQLite NULL comes back from pandas as NaN, while an unclassified TNS
+        row gives None. Comparing them directly is always False, so every
+        untyped object looked 'revised' on every run -- and nightly.sh replays a
+        week of deltas, so that was thousands of pointless writes a night."""
+        return None if v is None or (isinstance(v, float) and pd.isna(v)) else v
+
+    existing = {k: clean(v) for k, v in prev.tns_type.to_dict().items()}
+    existing_name = {k: clean(v) for k, v in prev.tns_name.to_dict().items()}
 
     updates, new, revised = [], 0, 0
     for r in rows.itertuples():
         before = existing.get(r.oid)
-        after = r.tns_type if isinstance(r.tns_type, str) else None
+        after = clean(r.tns_type if isinstance(r.tns_type, str) else None)
         # Compare the NAME too, not just the type. An object reported to TNS but
         # not yet classified has type NULL on both sides, so a type-only check
         # skips it -- and we would never record that it had been reported at
@@ -128,7 +136,7 @@ def fetch_missing_p_sn(conn: sqlite3.Connection, limit: int, rate: float,
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(one, o) for o in todo.oid]
         for f in tqdm(as_completed(futures), total=len(futures),
-                      desc="baseline p_sn", unit="obj"):
+                      desc="baseline p_sn", unit="obj", disable=None):
             oid, p = f.result()
             if p is not None:
                 got.append((float(p), oid))

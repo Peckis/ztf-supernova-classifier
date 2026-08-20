@@ -14,3 +14,9 @@ data/
 data_laptop_backup/
 *.tar.gz
 *.zip
+
+# real credentials (.env.example is the tracked template) and run state
+.env
+.nightly.lock
+logs/
+dashboard/
