@@ -14,7 +14,14 @@ REPO="$PWD"
 MARKER="# ztf-supernova-classifier nightly"
 # 08:30 UTC: ZTF publishes the previous night around 07:10 UTC, so this leaves
 # room for the file to appear without waiting a whole extra day.
-ENTRY="30 8 * * * cd $REPO && /usr/bin/flock -n .nightly.lock bash nightly.sh $MARKER"
+#
+# Deliberately NOT wrapped in flock here: nightly.sh takes the lock itself.
+# flock() treats separate file descriptors independently even inside one
+# process, so an outer `flock -n .nightly.lock bash nightly.sh` would make the
+# script's own lock attempt fail -- it would print "another nightly run is still
+# going", exit 0, and never actually run, with a log that looked entirely
+# normal every single day.
+ENTRY="30 8 * * * cd $REPO && bash nightly.sh $MARKER"
 
 current=$(crontab -l 2>/dev/null || true)
 cleaned=$(printf '%s\n' "$current" | grep -vF "$MARKER" || true)
