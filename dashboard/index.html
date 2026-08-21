@@ -53,8 +53,8 @@ classifier on exactly the same images.</p>
  <div class="stat"><b>543</b><span>alerts scored</span></div>
  <div class="stat"><b>1</b><span>nights ingested</span></div>
  <div class="stat"><b>0</b><span>confirmed by spectroscopy</span></div>
- <div class="stat"><b>—</b><span>our AUC</span></div>
- <div class="stat"><b>—</b><span>ALeRCE AUC</span></div>
+ <div class="stat"><b>—</b><span>of those we flagged</span></div>
+ <div class="stat"><b>— / —</b><span>AUC, ours / ALeRCE</span></div>
 </div>
 
 <h2>Performance over time</h2>
@@ -64,20 +64,27 @@ tightens as evidence accrues rather than jittering on three-object nights. The
 bars show how many labels each point rests on.</p>
 
 <h2>What the model actually saw</h2>
-<p class="sub">Waiting for the first spectroscopic confirmations. Objects are
-scored the night they arrive; the Transient Name Server publishes what they
-actually were over the following weeks, and the gallery appears once there is
-truth to compare against.</p>
+<img src="highlights.png" alt="Example stamps the model classified">
+<p class="sub">Errors first — a gallery of successes would say nothing the AUC
+does not. Each object shows the three channels the network receives: the new
+image, the reference, and their difference.</p>
 <h2>How to read these numbers</h2>
-<p class="caveat"><b>Two honest caveats.</b> Objects only get labelled if someone
-judged them worth a spectrum, so neither model can be measured on supernovae the
-whole community missed. And alerts from objects with more than two prior
-detections are deliberately not scored — this is an <em>early</em> classifier,
-and repeat detections of long-known variables fall outside what it was trained
-on.</p>
+<p class="caveat"><b>Three honest caveats.</b>
+<b>Negatives are presumed, not confirmed.</b> TNS is a supernova registry — its
+ZTF entries run roughly 14,500 confirmed supernovae to 600 confirmed
+non-supernovae — so scoring against confirmed negatives alone would rest on a
+handful of objects. Instead the controls are ordinary unlabelled alerts, which
+are &gt;99% not supernovae because supernovae are under 1% of the stream. That is
+a statistical claim about the set, not a fact about any one object.
+<b>Confirmation is selective.</b> Objects only get a spectrum if someone judged
+them worth one, so neither model can be measured on supernovae the whole
+community missed.
+<b>Only new objects are scored.</b> Alerts from objects with more than two prior
+detections are skipped — this is an <em>early</em> classifier, and repeat
+detections of long-known variables fall outside what it was trained on.</p>
 
 <footer>
- Updated 2026-08-20 15:53 UTC · pipeline running · rebuilt nightly
+ Updated 2026-08-21 13:10 UTC · pipeline running · rebuilt nightly
  · <a href="https://github.com/Peckis/ztf-supernova-classifier">source and methodology on GitHub</a>
 </footer>
 </html>

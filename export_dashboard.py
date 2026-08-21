@@ -48,16 +48,51 @@ def auc(prob, y):
     return (ranks[y == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
 
 
-def labelled_frame(conn) -> pd.DataFrame:
-    """One row per labelled object, earliest alert kept."""
-    d = pd.read_sql("""
+def labelled_frame(conn, controls_per_night: int = 300) -> pd.DataFrame:
+    """The evaluation set: confirmed supernovae plus presumed-negative controls.
+
+    Using ONLY TNS-labelled objects gives a degenerate sample. TNS is a
+    supernova registry -- objects get spectra precisely because someone thought
+    they might be supernovae -- so its ZTF-named entries run ~14,574 confirmed
+    SNe to ~610 confirmed non-SNe. Measured on this pipeline that produced 24
+    positives and ONE negative, and an AUC against a single negative is not a
+    measurement: it just asks what fraction of supernovae outscored that one
+    object. No amount of extra nights fixes it, because the imbalance is
+    structural.
+
+    So negatives come from the same base-rate argument that built the training
+    set: supernovae are <1% of the alert stream, so an unlabelled alert is
+    almost certainly not one. Controls are taken per night and deterministically
+    (lowest candid first) so the set is stable across rebuilds rather than
+    resampling itself every evening.
+
+    Objects that ARE in TNS but have no spectroscopic type are excluded from
+    both sides -- they were reported as candidate transients, so they are
+    enriched in supernovae and would be poor negatives.
+    """
+    positives = pd.read_sql("""
         SELECT oid, MIN(night) night, MAX(p_model) p_model, MAX(p_sn) p_sn,
                MAX(tns_label) tns_label, MAX(tns_type) tns_type,
-               MAX(labelled_at) labelled_at,
-               MAX(stamp_path) stamp_path
+               MAX(labelled_at) labelled_at, MAX(stamp_path) stamp_path
         FROM alerts WHERE tns_label IS NOT NULL
-        GROUP BY oid ORDER BY night
+        GROUP BY oid
     """, conn)
+
+    controls = pd.read_sql("""
+        SELECT oid, night, p_model, p_sn, NULL tns_label, NULL tns_type,
+               NULL labelled_at, stamp_path
+        FROM (
+            SELECT oid, night, p_model, p_sn, stamp_path,
+                   ROW_NUMBER() OVER (PARTITION BY night ORDER BY candid) rn
+            FROM alerts
+            WHERE tns_label IS NULL AND tns_name IS NULL
+        ) WHERE rn <= ?
+    """, conn, params=(controls_per_night,))
+    controls["tns_label"] = 0
+    controls["tns_type"] = "unlabelled (presumed not-SN)"
+
+    d = pd.concat([positives, controls], ignore_index=True)
+    d = d.drop_duplicates("oid").sort_values("night").reset_index(drop=True)
     # An empty result comes back as object dtype, which makes nlargest and the
     # numpy comparisons blow up rather than simply yield nothing. Everything
     # downstream is written to cope with zero rows, so force the types.
@@ -66,20 +101,34 @@ def labelled_frame(conn) -> pd.DataFrame:
     return d
 
 
+def recall_at(prob, y, threshold=0.5) -> tuple[int, int]:
+    """How many confirmed supernovae we flagged. Needs no negatives at all, so
+    it stays meaningful however lopsided the labelled sample is."""
+    sn = y == 1
+    return int((prob[sn] >= threshold).sum()), int(sn.sum())
+
+
 def cumulative_history(d: pd.DataFrame) -> list[dict]:
-    """Metrics over every object labelled up to each night."""
+    """Metrics over every object in the evaluation set up to each night."""
     out = []
     for night in sorted(d.night.unique()):
         upto = d[d.night <= night]
         y = upto.tns_label.to_numpy().astype(int)
+        found, total = recall_at(upto.p_model.to_numpy(), y)
         row = {"night": str(night), "n": int(len(upto)),
-               "n_sn": int(y.sum()), "model_auc": None, "baseline_auc": None}
+               "n_sn": int(y.sum()), "n_control": int((y == 0).sum()),
+               "recall": round(found / total, 4) if total else None,
+               "model_auc": None, "baseline_auc": None}
         if y.sum() and (y == 0).sum():
             row["model_auc"] = round(float(auc(upto.p_model.to_numpy(), y)), 4)
-            has = upto.p_sn.notna()
+            # The baseline is only fetched for a subset, so score it on exactly
+            # the objects where both models have an opinion -- otherwise the two
+            # curves would be measured on different populations.
+            has = upto.p_sn.notna().to_numpy()
             if has.sum() and y[has].sum() and (y[has] == 0).sum():
                 row["baseline_auc"] = round(
-                    float(auc(upto.p_sn[has].to_numpy(), y[has])), 4)
+                    float(auc(upto.p_sn.to_numpy()[has], y[has])), 4)
+                row["baseline_n"] = int(has.sum())
         out.append(row)
     return out
 
@@ -95,8 +144,9 @@ def write_plot(history, path: Path, min_points: int = 2):
 
     usable = [h for h in history if h["model_auc"] is not None]
     if len(usable) < min_points:
-        ax.text(0.5, 0.5, "not enough labelled objects yet\n"
-                          "(needs both classes confirmed by TNS)",
+        ax.text(0.5, 0.5, "waiting for spectroscopic confirmations\n"
+                          "(objects are scored on arrival; TNS publishes\n"
+                          "what they were over the following weeks)",
                 ha="center", va="center", transform=ax.transAxes,
                 fontsize=11, color="dimgray")
         ax.set_ylim(0, 1)
@@ -112,13 +162,15 @@ def write_plot(history, path: Path, min_points: int = 2):
         ax.axhline(0.5, ls=":", lw=1, color="gray")
     ax.set_ylabel("AUC (cumulative)")
     ax.set_title("Supernova identification vs the broker baseline\n"
-                 "cumulative over every TNS-confirmed object to date",
+                 "TNS-confirmed supernovae against unlabelled stream controls",
                  fontsize=12)
     ax.grid(alpha=0.25)
 
-    # the evidence behind each point, so nobody reads a curve built on n=3
-    ax2.bar(nights, [h["n"] for h in history], color="0.6", width=0.6)
-    ax2.set_ylabel("objects\nlabelled", fontsize=8)
+    # Plot the CONFIRMED SUPERNOVA count, not the total. Controls are plentiful
+    # and cheap; spectroscopic confirmations are the scarce ingredient, and they
+    # are what actually determines whether a point means anything.
+    ax2.bar(nights, [h["n_sn"] for h in history], color="0.6", width=0.6)
+    ax2.set_ylabel("confirmed\nSNe", fontsize=8)
     ax2.grid(alpha=0.25, axis="y")
     ax2.tick_params(axis="x", rotation=45, labelsize=7)
 
@@ -278,8 +330,8 @@ classifier on exactly the same images.</p>
  <div class="stat"><b>{n_alerts:,}</b><span>alerts scored</span></div>
  <div class="stat"><b>{n_nights}</b><span>nights ingested</span></div>
  <div class="stat"><b>{n_labelled:,}</b><span>confirmed by spectroscopy</span></div>
- <div class="stat"><b>{auc_txt}</b><span>our AUC</span></div>
- <div class="stat"><b>{base_txt}</b><span>ALeRCE AUC</span></div>
+ <div class="stat"><b>{recall_txt}</b><span>of those we flagged</span></div>
+ <div class="stat"><b>{auc_txt} / {base_txt}</b><span>AUC, ours / ALeRCE</span></div>
 </div>
 
 <h2>Performance over time</h2>
@@ -290,12 +342,19 @@ bars show how many labels each point rests on.</p>
 
 {gallery}
 <h2>How to read these numbers</h2>
-<p class="caveat"><b>Two honest caveats.</b> Objects only get labelled if someone
-judged them worth a spectrum, so neither model can be measured on supernovae the
-whole community missed. And alerts from objects with more than two prior
-detections are deliberately not scored — this is an <em>early</em> classifier,
-and repeat detections of long-known variables fall outside what it was trained
-on.</p>
+<p class="caveat"><b>Three honest caveats.</b>
+<b>Negatives are presumed, not confirmed.</b> TNS is a supernova registry — its
+ZTF entries run roughly 14,500 confirmed supernovae to 600 confirmed
+non-supernovae — so scoring against confirmed negatives alone would rest on a
+handful of objects. Instead the controls are ordinary unlabelled alerts, which
+are &gt;99% not supernovae because supernovae are under 1% of the stream. That is
+a statistical claim about the set, not a fact about any one object.
+<b>Confirmation is selective.</b> Objects only get a spectrum if someone judged
+them worth one, so neither model can be measured on supernovae the whole
+community missed.
+<b>Only new objects are scored.</b> Alerts from objects with more than two prior
+detections are skipped — this is an <em>early</em> classifier, and repeat
+detections of long-known variables fall outside what it was trained on.</p>
 
 <footer>
  Updated {updated} · pipeline {status_text_lower} · rebuilt nightly
@@ -350,8 +409,11 @@ def main(argv=None) -> int:
     if len(d) and has.sum() and y[has].sum() and (y[has] == 0).sum():
         base_auc = auc(d.p_sn[has].to_numpy(), y[has])
 
+    found, total_sn = recall_at(d.p_model.to_numpy(), y) if len(d) else (0, 0)
     payload = {
         "n_alerts": int(totals.n_alerts), "n_nights": int(totals.n_nights),
+        "n_confirmed_sn": int(total_sn), "n_controls": int((y == 0).sum()) if len(y) else 0,
+        "recall": round(found / total_sn, 4) if total_sn else None,
         "n_labelled": int(len(d)),
         "model_auc": None if np.isnan(model_auc) else round(float(model_auc), 4),
         "baseline_auc": None if np.isnan(base_auc) else round(float(base_auc), 4),
@@ -385,7 +447,9 @@ truth to compare against.</p>""")
 
     (args.out / "index.html").write_text(INDEX.format(
         n_alerts=payload["n_alerts"], n_nights=payload["n_nights"],
-        n_labelled=payload["n_labelled"],
+        n_labelled=payload["n_confirmed_sn"],
+        recall_txt=("—" if payload["recall"] is None
+                    else f"{found}/{total_sn}"),
         auc_txt="—" if payload["model_auc"] is None else f"{payload['model_auc']:.3f}",
         base_txt="—" if payload["baseline_auc"] is None else f"{payload['baseline_auc']:.3f}",
         updated=payload["updated"], status_text=health,
@@ -401,6 +465,10 @@ truth to compare against.</p>""")
     else:
         print(f"  AUC ours {payload['model_auc']} vs baseline "
               f"{payload['baseline_auc']}")
+    print(f"  evaluation set: {payload['n_confirmed_sn']} confirmed SNe vs "
+          f"{payload['n_controls']} presumed-negative controls")
+    if payload["recall"] is not None:
+        print(f"  recall @0.5   : {found}/{total_sn} = {payload['recall']:.1%}")
     if not made:
         print("  no highlights yet: needs labelled objects with stored stamps")
     conn.close()

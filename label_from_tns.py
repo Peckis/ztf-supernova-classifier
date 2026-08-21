@@ -104,17 +104,36 @@ def apply_labels(conn: sqlite3.Connection, rows: pd.DataFrame) -> dict:
 
 
 def fetch_missing_p_sn(conn: sqlite3.Connection, limit: int, rate: float,
-                       workers: int) -> int:
+                       workers: int, control_per_night: int = 300) -> int:
     """Get ALeRCE's baseline score, but only for objects that now have truth.
 
     Deliberately not fetched at ingest time: 55,000 alerts a night would be
     hours of API calls. The accuracy plot only ever compares the two models on
     LABELLED objects, and TNS confirms a handful per night, so this stays cheap.
     """
+    # Labelled objects first -- they are the positives and always worth having.
     todo = pd.read_sql(
         "SELECT DISTINCT oid FROM alerts "
         "WHERE tns_label IS NOT NULL AND p_sn IS NULL LIMIT ?",
         conn, params=(limit,))
+
+    # Then top up with control objects. The dashboard scores both models on
+    # confirmed supernovae versus presumed-negative controls, so the baseline
+    # needs an opinion on the controls too -- otherwise the two curves get
+    # measured on different populations and the comparison is meaningless.
+    # Same deterministic per-night pick the dashboard uses, so the p_sn we
+    # fetch is for the objects it will actually evaluate.
+    spare = limit - len(todo)
+    if spare > 0:
+        controls = pd.read_sql("""
+            SELECT DISTINCT oid FROM (
+                SELECT oid, ROW_NUMBER() OVER (PARTITION BY night ORDER BY candid) rn
+                FROM alerts WHERE tns_label IS NULL AND tns_name IS NULL
+                  AND p_sn IS NULL
+            ) WHERE rn <= ? LIMIT ?
+        """, conn, params=(control_per_night, spare))
+        todo = pd.concat([todo, controls], ignore_index=True).drop_duplicates("oid")
+
     if todo.empty:
         return 0
 
@@ -191,6 +210,10 @@ def main(argv=None) -> int:
     parser.add_argument("--db", type=Path, default=DB_PATH)
     parser.add_argument("--p-sn-limit", type=int, default=500,
                         help="max baseline lookups this run (0 to skip)")
+    parser.add_argument("--controls-per-night", type=int, default=300,
+                        help="presumed-negative controls per night to score "
+                             "with the baseline, matching what the dashboard "
+                             "evaluates on")
     parser.add_argument("--rate", type=float, default=2.0)
     parser.add_argument("--workers", type=int, default=3)
     args = parser.parse_args(argv)
@@ -222,7 +245,8 @@ def main(argv=None) -> int:
           f"({stats['new']:,} newly labelled, {stats['revised']:,} revised)")
 
     if args.p_sn_limit:
-        n = fetch_missing_p_sn(conn, args.p_sn_limit, args.rate, args.workers)
+        n = fetch_missing_p_sn(conn, args.p_sn_limit, args.rate, args.workers,
+                               args.controls_per_night)
         print(f"fetched baseline p_sn for {n:,} objects")
 
     summarise(conn)
