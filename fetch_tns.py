@@ -48,7 +48,28 @@ NON_SN_TYPES = {
 }
 
 
+def _load_dotenv() -> None:
+    """Read .env if the variables are not already exported.
+
+    nightly.sh sources .env before it runs anything, so the cron path always has
+    credentials. Running a script by hand did not, which meant the same command
+    worked from cron and failed from a shell -- a confusing difference with no
+    good reason for existing. Values already in the environment win, so an
+    explicit `export` or `set -a; . .env` still overrides the file.
+    """
+    path = Path(__file__).parent / ".env"
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
 def credentials() -> tuple[str, str, str]:
+    _load_dotenv()
     bot_id = os.environ.get("TNS_BOT_ID", "")
     bot_name = os.environ.get("TNS_BOT_NAME", "")
     api_key = os.environ.get("TNS_API_KEY", "")
