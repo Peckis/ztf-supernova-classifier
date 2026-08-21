@@ -98,7 +98,13 @@ def check_scheduler(events) -> tuple[str, list[str]]:
 
 
 def check_last_outcome(events) -> tuple[str, list[str]]:
-    finished = [e for e in events if e[2] == "run" and "finished" in e[3]]
+    # "skipped" is a terminal outcome, not a death. nightly.sh exits early and
+    # cleanly when it finds the lock held -- which is what should happen while a
+    # backfill is running -- and that path returns before the "finished" event
+    # at the end of the script. Counting only "finished" made a correct skip
+    # look like a crashed run, i.e. a monitor crying wolf at its own design.
+    finished = [e for e in events if e[2] == "run"
+                and ("finished" in e[3] or e[3].startswith("skipped"))]
     started = [e for e in events if e[2] == "run" and e[3] == "started"]
     if not finished:
         if started:
@@ -112,6 +118,8 @@ def check_last_outcome(events) -> tuple[str, list[str]]:
     last = max(finished, key=lambda e: e[0])
     if last[1] == "ERROR":
         return FAILING, [f"last outcome    : {last[3]}"]
+    if last[3].startswith("skipped"):
+        return OK, ["last outcome    : skipped (another run held the lock)"]
     return OK, ["last outcome    : finished cleanly"]
 
 
