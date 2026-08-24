@@ -134,6 +134,18 @@ else
   done
 fi
 
+# --- 2b. confirm negatives against external catalogues ------------------
+# Upgrades "presumed not a supernova because they are rare" into "catalogued
+# variable star". Only touches the control objects the dashboard evaluates, and
+# only ones without a verdict yet, so it stays small after the first run.
+echo "-- confirming negatives against SIMBAD / Milliquas / VSX"
+if "$PY" -u confirm_negatives.py --limit 3000; then
+  event OK confirm "catalogue crossmatch done"
+else
+  echo "   crossmatch failed"
+  event WARN confirm "crossmatch failed (controls stay presumed-negative)"
+fi
+
 # --- 3. rebuild the static dashboard -----------------------------------
 echo "-- dashboard"
 if "$PY" -u export_dashboard.py; then

@@ -73,23 +73,34 @@ def labelled_frame(conn, controls_per_night: int = 300) -> pd.DataFrame:
     positives = pd.read_sql("""
         SELECT oid, MIN(night) night, MAX(p_model) p_model, MAX(p_sn) p_sn,
                MAX(tns_label) tns_label, MAX(tns_type) tns_type,
-               MAX(labelled_at) labelled_at, MAX(stamp_path) stamp_path
+               MAX(labelled_at) labelled_at, MAX(stamp_path) stamp_path,
+               NULL cat_class, NULL cat_source
         FROM alerts WHERE tns_label IS NOT NULL
         GROUP BY oid
     """, conn)
 
-    controls = pd.read_sql("""
+    has_cat = "cat_class" in {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}
+    cat_cols = ("cat_class, cat_source," if has_cat else
+                "NULL cat_class, NULL cat_source,")
+    controls = pd.read_sql(f"""
         SELECT oid, night, p_model, p_sn, NULL tns_label, NULL tns_type,
-               NULL labelled_at, stamp_path
+               NULL labelled_at, stamp_path, cat_class, cat_source
         FROM (
-            SELECT oid, night, p_model, p_sn, stamp_path,
+            SELECT oid, night, p_model, p_sn, stamp_path, {cat_cols}
                    ROW_NUMBER() OVER (PARTITION BY night ORDER BY candid) rn
             FROM alerts
             WHERE tns_label IS NULL AND tns_name IS NULL
         ) WHERE rn <= ?
     """, conn, params=(controls_per_night,))
     controls["tns_label"] = 0
-    controls["tns_type"] = "unlabelled (presumed not-SN)"
+    # Say which negatives are evidence-backed. confirm_negatives.py matches
+    # against SIMBAD, Milliquas and VSX, and only accepts types that positively
+    # cannot be a supernova -- stars and AGN. A galaxy match is deliberately
+    # NOT accepted, because a supernova sits in a galaxy and such a match is
+    # exactly what a real one looks like.
+    controls["tns_type"] = controls.cat_class.map(
+        {"star": "catalogued variable star / stellar source",
+         "agn": "catalogued AGN / quasar"}).fillna("unlabelled (presumed not-SN)")
 
     d = pd.concat([positives, controls], ignore_index=True)
     d = d.drop_duplicates("oid").sort_values("night").reset_index(drop=True)
@@ -343,12 +354,17 @@ bars show how many labels each point rests on.</p>
 {gallery}
 <h2>How to read these numbers</h2>
 <p class="caveat"><b>Three honest caveats.</b>
-<b>Negatives are presumed, not confirmed.</b> TNS is a supernova registry — its
-ZTF entries run roughly 14,500 confirmed supernovae to 600 confirmed
-non-supernovae — so scoring against confirmed negatives alone would rest on a
-handful of objects. Instead the controls are ordinary unlabelled alerts, which
-are &gt;99% not supernovae because supernovae are under 1% of the stream. That is
-a statistical claim about the set, not a fact about any one object.
+<b>Most negatives are catalogued, the rest presumed.</b> TNS is a supernova
+registry — its ZTF entries run roughly 14,500 confirmed supernovae to 600
+confirmed non-supernovae — so scoring against TNS negatives alone would rest on
+a handful of objects. Instead the controls are ordinary stream alerts,
+crossmatched against SIMBAD, Milliquas and the AAVSO variable star index:
+{n_confirmed_negatives} of {n_controls} are catalogued stars or active galactic
+nuclei, which positively cannot be supernovae. The rest are presumed negative
+because supernovae are under 1% of the stream — true of the set, not proven of
+any one object. An alert matching a catalogued <em>galaxy</em> is deliberately
+never counted: supernovae explode inside galaxies, so that match is exactly what
+a real one looks like.
 <b>Confirmation is selective.</b> Objects only get a spectrum if someone judged
 them worth one, so neither model can be measured on supernovae the whole
 community missed.
@@ -410,9 +426,11 @@ def main(argv=None) -> int:
         base_auc = auc(d.p_sn[has].to_numpy(), y[has])
 
     found, total_sn = recall_at(d.p_model.to_numpy(), y) if len(d) else (0, 0)
+    n_confirmed_neg = int(d.cat_class.notna().sum()) if "cat_class" in d else 0
     payload = {
         "n_alerts": int(totals.n_alerts), "n_nights": int(totals.n_nights),
         "n_confirmed_sn": int(total_sn), "n_controls": int((y == 0).sum()) if len(y) else 0,
+        "n_confirmed_negatives": n_confirmed_neg,
         "recall": round(found / total_sn, 4) if total_sn else None,
         "n_labelled": int(len(d)),
         "model_auc": None if np.isnan(model_auc) else round(float(model_auc), 4),
@@ -454,7 +472,9 @@ truth to compare against.</p>""")
         base_txt="—" if payload["baseline_auc"] is None else f"{payload['baseline_auc']:.3f}",
         updated=payload["updated"], status_text=health,
         status_text_lower=health.lower(), status_class=health_class,
-        repo_url=args.repo_url, gallery=gallery), encoding="utf-8")
+        repo_url=args.repo_url, gallery=gallery,
+        n_confirmed_negatives=payload["n_confirmed_negatives"],
+        n_controls=payload["n_controls"]), encoding="utf-8")
 
     print(f"wrote {args.out}/  (accuracy.json, accuracy.svg, index.html"
           f"{', highlights.png' if made else ''})")
@@ -466,7 +486,8 @@ truth to compare against.</p>""")
         print(f"  AUC ours {payload['model_auc']} vs baseline "
               f"{payload['baseline_auc']}")
     print(f"  evaluation set: {payload['n_confirmed_sn']} confirmed SNe vs "
-          f"{payload['n_controls']} presumed-negative controls")
+          f"{payload['n_controls']} controls "
+          f"({payload['n_confirmed_negatives']} catalogue-confirmed, rest presumed)")
     if payload["recall"] is not None:
         print(f"  recall @0.5   : {found}/{total_sn} = {payload['recall']:.1%}")
     if not made:
