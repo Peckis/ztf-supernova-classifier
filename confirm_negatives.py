@@ -93,6 +93,24 @@ def ensure_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def require_astroquery():
+    """Fail loudly if the crossmatch dependency is missing.
+
+    This used to be imported inside crossmatch(), where the per-batch
+    `except Exception` treated a missing package exactly like a transient query
+    error: every batch "failed", nothing was confirmed, and the script exited 0.
+    On the server that meant confirm_negatives ran nightly and silently did
+    nothing for days. A missing dependency is not a recoverable per-batch
+    problem, so it stops the run.
+    """
+    try:
+        from astroquery.xmatch import XMatch  # noqa: F401
+    except ImportError:
+        sys.exit("astroquery is not installed -- the catalogue crossmatch "
+                 "cannot run.\n  fix: uv pip install astroquery\n"
+                 "  (setup_server.sh installs it for new deployments)")
+
+
 def crossmatch(frame: pd.DataFrame, table: str, radius: float):
     from astropy import units as u
     from astropy.table import Table
@@ -119,6 +137,7 @@ def main(argv=None) -> int:
                              "controls the dashboard evaluates")
     args = parser.parse_args(argv)
 
+    require_astroquery()
     if not args.db.exists():
         sys.exit(f"{args.db} does not exist -- run ingest_night.py first")
     conn = connect(args.db)

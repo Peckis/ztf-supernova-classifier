@@ -24,7 +24,7 @@ fi
 
 # CPU wheels: the CUDA build is ~2.5 GB and buys nothing here
 uv pip install torch --index-url https://download.pytorch.org/whl/cpu
-uv pip install alerce astropy fastavro matplotlib numpy pandas requests tqdm
+uv pip install alerce astropy astroquery fastavro matplotlib numpy pandas requests tqdm
 
 PY=.venv/bin/python
 mkdir -p data logs
