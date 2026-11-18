@@ -119,6 +119,43 @@ def recall_at(prob, y, threshold=0.5) -> tuple[int, int]:
     return int((prob[sn] >= threshold).sum()), int(sn.sum())
 
 
+def paired_interval(d: pd.DataFrame, n_boot: int = 2000) -> dict | None:
+    """Error bars on the head-to-head, from a paired bootstrap.
+
+    The two headline AUCs are each computed on every object that model scored,
+    which is the right summary but NOT a comparison: they rest on different
+    populations, because the baseline is only fetched for a subset. A difference
+    is only meaningful on the objects BOTH models scored, resampled together so
+    their correlated errors cancel.
+
+    Without this the page quotes bare point estimates, and a difference of
+    +0.028 reads as settled when the interval very nearly touches zero.
+    """
+    sub = d[d.p_sn.notna()]
+    y = sub.tns_label.to_numpy().astype(int)
+    # a bootstrap over a handful of objects reports an interval it has not
+    # earned -- this pipeline once computed an AUC against a single negative
+    if len(sub) < 20 or y.sum() < 5 or (y == 0).sum() < 5:
+        return None
+
+    from benchmark import bootstrap_auc
+    ours, theirs = sub.p_model.to_numpy(), sub.p_sn.to_numpy()
+    a, b, diff = bootstrap_auc(ours, theirs, y, n_boot=n_boot)
+    if not len(diff):
+        return None
+
+    def ci(arr):
+        return [round(float(v), 4) for v in np.percentile(arr, [2.5, 97.5])]
+
+    return {
+        "n": int(len(sub)), "n_sn": int(y.sum()),
+        "model_auc": round(float(auc(ours, y)), 4), "model_ci": ci(a),
+        "baseline_auc": round(float(auc(theirs, y)), 4), "baseline_ci": ci(b),
+        "diff": round(float(np.mean(diff)), 4), "diff_ci": ci(diff),
+        "excludes_zero": bool(np.percentile(diff, 2.5) > 0),
+    }
+
+
 def cumulative_history(d: pd.DataFrame) -> list[dict]:
     """Metrics over every object in the evaluation set up to each night."""
     out = []
@@ -351,6 +388,8 @@ classifier on exactly the same images.</p>
 tightens as evidence accrues rather than jittering on three-object nights. The
 bars show how many labels each point rests on.</p>
 
+{ci_line}
+
 {gallery}
 <h2>How to read these numbers</h2>
 <p class="caveat"><b>Three honest caveats.</b>
@@ -427,7 +466,9 @@ def main(argv=None) -> int:
 
     found, total_sn = recall_at(d.p_model.to_numpy(), y) if len(d) else (0, 0)
     n_confirmed_neg = int(d.cat_class.notna().sum()) if "cat_class" in d else 0
+    paired = paired_interval(d) if len(d) else None
     payload = {
+        "paired": paired,
         "n_alerts": int(totals.n_alerts), "n_nights": int(totals.n_nights),
         "n_confirmed_sn": int(total_sn), "n_controls": int((y == 0).sum()) if len(y) else 0,
         "n_confirmed_negatives": n_confirmed_neg,
@@ -463,6 +504,27 @@ scored the night they arrive; the Transient Name Server publishes what they
 actually were over the following weeks, and the gallery appears once there is
 truth to compare against.</p>""")
 
+    # Quote the interval, not the point estimate. A difference that nearly
+    # touches zero and one that is comfortably clear of it look identical as
+    # bare numbers, and only one of them supports a claim.
+    if paired is None:
+        ci_line = ('<p class="sub">Not enough confirmed objects yet to put an '
+                   'error bar on the difference.</p>')
+    else:
+        verdict = ("the interval excludes zero" if paired["excludes_zero"]
+                   else "the interval spans zero, so this is a tie")
+        ci_line = (
+            f'<p class="sub">Head-to-head on the {paired["n"]:,} objects both '
+            f'models scored ({paired["n_sn"]} confirmed supernovae): ours '
+            f'<b>{paired["model_auc"]:.3f}</b> '
+            f'[{paired["model_ci"][0]:.3f}, {paired["model_ci"][1]:.3f}] '
+            f'vs ALeRCE <b>{paired["baseline_auc"]:.3f}</b> '
+            f'[{paired["baseline_ci"][0]:.3f}, {paired["baseline_ci"][1]:.3f}]. '
+            f'Difference <b>{paired["diff"]:+.3f}</b> '
+            f'[{paired["diff_ci"][0]:+.3f}, {paired["diff_ci"][1]:+.3f}] — '
+            f'{verdict}. 95% CI from a paired bootstrap, resampling the same '
+            f'objects for both models.</p>')
+
     (args.out / "index.html").write_text(INDEX.format(
         n_alerts=payload["n_alerts"], n_nights=payload["n_nights"],
         n_labelled=payload["n_confirmed_sn"],
@@ -472,7 +534,7 @@ truth to compare against.</p>""")
         base_txt="—" if payload["baseline_auc"] is None else f"{payload['baseline_auc']:.3f}",
         updated=payload["updated"], status_text=health,
         status_text_lower=health.lower(), status_class=health_class,
-        repo_url=args.repo_url, gallery=gallery,
+        repo_url=args.repo_url, gallery=gallery, ci_line=ci_line,
         n_confirmed_negatives=payload["n_confirmed_negatives"],
         n_controls=payload["n_controls"]), encoding="utf-8")
 
@@ -485,6 +547,17 @@ truth to compare against.</p>""")
     else:
         print(f"  AUC ours {payload['model_auc']} vs baseline "
               f"{payload['baseline_auc']}")
+    if paired:
+        print(f"  paired head-to-head on {paired['n']:,} objects "
+              f"({paired['n_sn']} SNe):")
+        print(f"    ours     {paired['model_auc']:.4f}  "
+              f"[{paired['model_ci'][0]:.4f}, {paired['model_ci'][1]:.4f}]")
+        print(f"    ALeRCE   {paired['baseline_auc']:.4f}  "
+              f"[{paired['baseline_ci'][0]:.4f}, {paired['baseline_ci'][1]:.4f}]")
+        print(f"    diff    {paired['diff']:+.4f}  "
+              f"[{paired['diff_ci'][0]:+.4f}, {paired['diff_ci'][1]:+.4f}]  "
+              + ("<- excludes zero" if paired["excludes_zero"]
+                 else "<- SPANS ZERO, do not claim a win"))
     print(f"  evaluation set: {payload['n_confirmed_sn']} confirmed SNe vs "
           f"{payload['n_controls']} controls "
           f"({payload['n_confirmed_negatives']} catalogue-confirmed, rest presumed)")
