@@ -1,10 +1,8 @@
 """Render example stamps per class, so you can see what the model sees.
 
-Astronomical images need a stretch to be legible: raw values span orders of
-magnitude, so a linear grey scale shows nothing. We clip to robust percentiles
-and apply asinh -- the same compression train.py feeds the network.
+Raw pixel values span orders of magnitude, so they get the same percentile
+clip and asinh compression train.py feeds the network.
 
-    python show_stamps.py            # 3 examples per class
     python show_stamps.py --n 5
 """
 
@@ -45,10 +43,7 @@ def stretch(plane):
 
 
 def central_snr(arr):
-    """Peak of the difference image near the centre, in units of its own noise.
-
-    Used to pick clear teaching examples rather than marginal detections.
-    """
+    """Peak of the difference image near the centre, in units of its own noise."""
     diff = np.nan_to_num(arr[2])
     core = diff[26:37, 26:37]
     noise = 1.4826 * np.median(np.abs(diff - np.median(diff))) + 1e-6
@@ -58,9 +53,8 @@ def central_snr(arr):
 def pick(manifest, class_name, n):
     """Clearest examples of one class.
 
-    For SN we require a short detection span first: an object detected across
-    years cannot be a supernova, and ~38% of the SN class is contaminated that
-    way. Showing those as textbook examples would teach the wrong thing.
+    SN needs a short detection span first: an object detected across years
+    cannot be a supernova, and ~38% of the SN class is contaminated that way.
     """
     rows = manifest[manifest.alerce_class == class_name]
     if class_name == "SN":
@@ -99,9 +93,6 @@ def main():
                     spine.set_color("0.6")
                 if r == 0:
                     ax.set_title(channel, fontsize=8, pad=3)
-                # # red cross marks the alert position -- where the transient is
-                # ax.plot(31, 31, marker="+", color="red", markersize=8,
-                #         markeredgewidth=0.7, alpha=0.75)
             axes[r, e * 3].set_xlabel(f"{obj.oid}  snr={obj.snr:.0f}",
                                       fontsize=6, labelpad=1.5)
 

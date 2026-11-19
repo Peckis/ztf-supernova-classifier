@@ -1,27 +1,17 @@
 """Upgrade presumed negatives to confirmed ones using external catalogues.
 
-The dashboard's controls are ordinary unlabelled alerts, called not-supernovae
-on a base-rate argument: supernovae are under 1% of the stream, so almost none
-of them are. True in aggregate, unproven for any single object.
+The dashboard's controls are unlabelled alerts called not-supernovae on a
+base-rate argument, which is true in aggregate and unproven for any one object.
+Crossmatching against SIMBAD, Milliquas and AAVSO VSX replaces that inference
+with evidence where evidence exists.
 
-This replaces that inference with evidence where evidence exists. An alert
-sitting on a catalogued variable star or a spectroscopically confirmed quasar is
-not a supernova, and we can say so rather than assume it.
-
-    python confirm_negatives.py              # label everything unlabelled
     python confirm_negatives.py --limit 5000
 
-Sources, all bulk-crossmatched through the CDS X-Match service:
-    SIMBAD              curated object types from the literature
-    Milliquas VII/294   ~1M quasars and AGN
-    AAVSO VSX B/vsx     ~2M variable stars
-
-THE TRAP THIS IS BUILT AROUND: a catalogue match is not automatically evidence
-of absence. Supernovae explode inside galaxies, so an alert matching a
-catalogued GALAXY looks exactly like a real supernova and proves nothing.
-SIMBAD also contains supernovae outright. So this uses an allowlist of types
-that are positively incompatible with being a supernova -- stars and AGN --
-and leaves everything else as a presumed negative rather than guessing.
+The trap this is built around: a catalogue match is not automatically evidence
+of absence. Supernovae explode inside galaxies, so a catalogued GALAXY match is
+exactly what a real one looks like, and SIMBAD contains supernovae outright.
+Hence an allowlist of types positively incompatible with being a supernova,
+with everything else left presumed rather than guessed at.
 """
 
 from __future__ import annotations
@@ -39,16 +29,15 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, str(Path(__file__).parent))
 from ingest_night import DB_PATH, connect  # noqa: E402
 
-# Catalogues to consult, in order of authority. First confident verdict wins.
+# in order of authority; first confident verdict wins
 CATALOGUES = [
     ("SIMBAD", "vizier:simbad", "main_type"),
     ("Milliquas", "vizier:VII/294/catalog", None),   # every entry is an AGN/QSO
     ("VSX", "vizier:B/vsx/vsx", None),               # every entry is a variable
 ]
 
-# SIMBAD types that positively cannot be a supernova. Stellar objects and
-# active galactic nuclei: a supernova is neither a star nor a persistent
-# nucleus. Matched case-insensitively against main_type.
+# types that positively cannot be a supernova: it is neither a star nor a
+# persistent nucleus. Matched case-insensitively against main_type.
 STELLAR = (
     "star", "*", "eclbin", "highpm", "sb*", "chempec", "horbranch", "rscvnv",
     "bydrav", "rgb", "**", "variable", "rrlyrae", "cepheid", "mira", "wolfrayet",
@@ -60,8 +49,7 @@ AGN_LIKE = (
     "seyfert", "qso", "agn", "bllac", "blazar", "liner", "activegalaxy",
     "quasar", "radiogalaxy",
 )
-# Anything containing these is ambiguous or outright a supernova, and must
-# never be treated as a negative regardless of what else matched.
+# ambiguous or outright a supernova: never a negative, whatever else matched
 NEVER_NEGATIVE = ("supernova", "sn", "snr", "galaxy", "galgroup", "galcluster",
                   "interactinggal", "transient", "gravlens")
 
@@ -72,9 +60,7 @@ def classify_type(main_type) -> str | None:
         return None
     t = main_type.strip().lower().replace(" ", "").replace("_", "")
 
-    # Rejections are checked FIRST. A type like "SNRemnant" contains "remnant"
-    # but must not slip through on some other rule, and a galaxy match is
-    # exactly what a genuine supernova produces.
+    # rejections first: "SNRemnant" would otherwise slip through on another rule
     for bad in NEVER_NEGATIVE:
         if t == bad or t.startswith(bad):
             return None
@@ -96,12 +82,9 @@ def ensure_columns(conn: sqlite3.Connection) -> None:
 def require_astroquery():
     """Fail loudly if the crossmatch dependency is missing.
 
-    This used to be imported inside crossmatch(), where the per-batch
-    `except Exception` treated a missing package exactly like a transient query
-    error: every batch "failed", nothing was confirmed, and the script exited 0.
-    On the server that meant confirm_negatives ran nightly and silently did
-    nothing for days. A missing dependency is not a recoverable per-batch
-    problem, so it stops the run.
+    Imported inside crossmatch(), the per-batch `except Exception` treated a
+    missing package like a transient query error: every batch "failed", nothing
+    was confirmed, and the script exited 0 nightly for days.
     """
     try:
         from astroquery.xmatch import XMatch  # noqa: F401
@@ -143,10 +126,8 @@ def main(argv=None) -> int:
     conn = connect(args.db)
     ensure_columns(conn)
 
-    # Target the objects the dashboard actually evaluates. The database holds
-    # every scored alert -- hundreds of thousands -- but only the per-night
-    # control sample is ever measured, so crossmatching the rest would put a
-    # large load on a free CDS service for no benefit. --all overrides this.
+    # only the per-night control sample is ever measured, so crossmatching all
+    # several hundred thousand alerts would load a free CDS service for nothing
     if args.all:
         todo = pd.read_sql("""
             SELECT oid, MAX(ra) ra, MAX(dec) dec FROM alerts

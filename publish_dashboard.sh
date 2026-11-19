@@ -4,17 +4,11 @@
 #   bash publish_dashboard.sh            # publish if anything changed
 #   bash publish_dashboard.sh --setup    # one-time instructions
 #
-# Why a SEPARATE repo rather than Pages on the main one:
+# A separate repo so the code repo can stay private, and so ~500 KB of nightly
+# binary churn (~180 MB a year) stays out of a history that is otherwise text.
 #
-#  * The code repo can stay private while the dashboard is public.
-#  * The artifacts are ~500 KB and regenerate nightly. Committing them into the
-#    code repo would add ~180 MB of binary churn a year to a history that is
-#    otherwise a few hundred KB of text.
-#
-# History here is kept at exactly ONE commit, amended and force-pushed each
-# time, so the published repo never grows no matter how long this runs. No
-# history is lost that matters: accuracy.json carries the full time series
-# inside it, which is the part worth keeping.
+# Kept at exactly ONE commit, amended and force-pushed, so the published repo
+# never grows. Nothing is lost: accuracy.json carries the full time series.
 
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"

@@ -1,20 +1,12 @@
 """Is the pipeline healthy? One command, one screen, one verdict.
 
-    python status.py            # human summary
-    python status.py --events   # plus the recent event log
-    python status.py --quiet    # print nothing, just set the exit code
+Checks compare what SHOULD have happened against what did, rather than reading
+back a log: the likeliest failures (cron removed, reboot, disk full, stale
+lock) produce no log line at all, just silence that looks like a quiet night.
 
-Exit codes, so this works from a monitor or a shell prompt too:
-    0  OK or DEGRADED   nothing needs you today
-    1  FAILING          a stage is erroring; the loop is still turning
-    2  STALLED          the loop is not running at all, or cannot continue
+    python status.py [--events] [--quiet]
 
-The important half of this is what a log file cannot tell you. Logs only record
-runs that HAPPENED. The likeliest real failure -- cron removed, machine
-rebooted, disk full, lock left stale -- produces no log line at all, just
-silence that looks exactly like a quiet night. So the checks below compare what
-should have happened against what did, rather than only reading back what was
-written.
+Exit codes: 0 OK/DEGRADED, 1 FAILING, 2 STALLED.
 """
 
 from __future__ import annotations
@@ -32,18 +24,14 @@ EVENTS = REPO / "logs" / "events.tsv"
 DASHBOARD = REPO / "dashboard" / "index.html"
 LOCK = REPO / ".nightly.lock"
 
-# Severity ladder. A check reports the worst thing it finds; the overall verdict
-# is the worst across all checks.
 OK, DEGRADED, FAILING, STALLED = "OK", "DEGRADED", "FAILING", "STALLED"
 RANK = {OK: 0, DEGRADED: 1, FAILING: 2, STALLED: 3}
 EXIT = {OK: 0, DEGRADED: 0, FAILING: 1, STALLED: 2}
 
-# A night of downloads plus stamps needs headroom; below this the next run
-# cannot complete, which is a stop-the-world problem rather than a warning.
 DISK_CRITICAL_GB = 20
 DISK_WARN_GB = 60
-# Missing one night is a weather night. Missing two days of RUNS means the
-# scheduler itself is gone.
+# missing one night is weather; missing two days of RUNS means the scheduler
+# itself is gone
 RUN_STALE_HOURS = 36
 RUN_CRITICAL_HOURS = 72
 
@@ -98,17 +86,13 @@ def check_scheduler(events) -> tuple[str, list[str]]:
 
 
 def check_last_outcome(events) -> tuple[str, list[str]]:
-    # "skipped" is a terminal outcome, not a death. nightly.sh exits early and
-    # cleanly when it finds the lock held -- which is what should happen while a
-    # backfill is running -- and that path returns before the "finished" event
-    # at the end of the script. Counting only "finished" made a correct skip
-    # look like a crashed run, i.e. a monitor crying wolf at its own design.
+    # "skipped" is terminal, not a death: nightly.sh exits early and cleanly
+    # when it finds the lock held, before the "finished" event is written
     finished = [e for e in events if e[2] == "run"
                 and ("finished" in e[3] or e[3].startswith("skipped"))]
     started = [e for e in events if e[2] == "run" and e[3] == "started"]
     if not finished:
         if started:
-            # started but never finished: either still going, or it died
             last = max(s[0] for s in started)
             if now() - last < timedelta(hours=6):
                 return OK, ["last outcome    : still running"]
@@ -146,7 +130,6 @@ def check_disk() -> tuple[str, list[str]]:
 
 
 def check_data() -> tuple[str, list[str]]:
-    """Is data actually flowing, or is the loop spinning on nothing?"""
     if not DB.exists():
         return STALLED, ["database        : missing -- nothing has ingested yet"]
     try:
@@ -182,7 +165,7 @@ def check_dashboard() -> tuple[str, list[str]]:
 
 
 def check_stale_lock() -> tuple[str, list[str]]:
-    """A lock left behind by a killed run blocks every future run, silently."""
+    """A lock left by a killed run blocks every future run, silently."""
     if not LOCK.exists():
         return OK, []
     age = now() - datetime.fromtimestamp(LOCK.stat().st_mtime, timezone.utc)

@@ -4,13 +4,12 @@
 #   git clone git@github.com:Peckis/ztf-supernova-classifier.git ~/ztf
 #   cd ~/ztf && bash setup_server.sh
 #
-# Installs CPU-only PyTorch on purpose. Inference measured at ~1,400 alerts/sec
-# on 4 threads, so a whole night takes under 5 minutes and the download
-# dominates by orders of magnitude. The K620s would not help even if they
-# worked: modern PyTorch has dropped kernels for Maxwell (compute 5.0).
+# CPU-only PyTorch on purpose: scoring a night is ~10 min of a ~23 min run,
+# the rest being download, and the K620s would not help even if they worked
+# (modern PyTorch has dropped Maxwell, compute 5.0).
 #
-# Training stays on the laptop GPU. model.pth is tracked in git, so deploying a
-# retrain is `git pull`.
+# Training stays on the laptop GPU. model.pth is tracked in git, so deploying
+# a retrain is `git pull`.
 
 set -euo pipefail
 cd "$(dirname "$0")"

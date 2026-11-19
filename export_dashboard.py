@@ -1,24 +1,9 @@
-"""Phase 2, step 3: export the money plot and a look inside the model.
+"""Export the accuracy plot, a stamp gallery and a static page from the db.
 
-Reads data/pipeline.db and writes static files -- no server, no live database
-connection. A portfolio page just loads them, which is why this is an export
-step rather than a web app: SQLite is not reachable from a browser, and neither
-is Postgres, so something has to render either way.
+Writes files rather than serving them, because SQLite is not reachable from a
+browser and a portfolio page just loads static assets.
 
     python export_dashboard.py --out dashboard/
-
-Produces:
-  accuracy.json    the numbers, for embedding anywhere
-  accuracy.svg     performance over time, ours vs the ALeRCE baseline
-  highlights.png   actual stamps: hits, misses, false alarms, disagreements
-  index.html       a single page tying them together
-
-On the plot: per-night accuracy is not worth plotting. TNS confirms a handful
-of ZTF objects a night, so a nightly point is a coin flip on n=3. Instead this
-shows a cumulative curve -- every object labelled up to that date -- which
-starts noisy and tightens honestly as evidence accrues, and never implies more
-precision than the sample supports. The label count is drawn underneath so a
-reader can see exactly how much evidence each point rests on.
 """
 
 from __future__ import annotations
@@ -49,26 +34,13 @@ def auc(prob, y):
 
 
 def labelled_frame(conn, controls_per_night: int = 300) -> pd.DataFrame:
-    """The evaluation set: confirmed supernovae plus presumed-negative controls.
+    """Confirmed supernovae plus presumed-negative stream controls.
 
-    Using ONLY TNS-labelled objects gives a degenerate sample. TNS is a
-    supernova registry -- objects get spectra precisely because someone thought
-    they might be supernovae -- so its ZTF-named entries run ~14,574 confirmed
-    SNe to ~610 confirmed non-SNe. Measured on this pipeline that produced 24
-    positives and ONE negative, and an AUC against a single negative is not a
-    measurement: it just asks what fraction of supernovae outscored that one
-    object. No amount of extra nights fixes it, because the imbalance is
-    structural.
-
-    So negatives come from the same base-rate argument that built the training
-    set: supernovae are <1% of the alert stream, so an unlabelled alert is
-    almost certainly not one. Controls are taken per night and deterministically
-    (lowest candid first) so the set is stable across rebuilds rather than
-    resampling itself every evening.
-
-    Objects that ARE in TNS but have no spectroscopic type are excluded from
-    both sides -- they were reported as candidate transients, so they are
-    enriched in supernovae and would be poor negatives.
+    TNS-labelled objects alone are degenerate: TNS is a supernova registry, so
+    its ZTF entries run ~14,500 confirmed SNe to ~610 confirmed non-SNe. On
+    this pipeline that once gave 24 positives and ONE negative. Controls are
+    therefore drawn from the stream on the base-rate argument, deterministically
+    per night so the set is stable across rebuilds.
     """
     positives = pd.read_sql("""
         SELECT oid, MIN(night) night, MAX(p_model) p_model, MAX(p_sn) p_sn,
@@ -82,6 +54,8 @@ def labelled_frame(conn, controls_per_night: int = 300) -> pd.DataFrame:
     has_cat = "cat_class" in {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}
     cat_cols = ("cat_class, cat_source," if has_cat else
                 "NULL cat_class, NULL cat_source,")
+    # objects in TNS but untyped are excluded from both sides: they were
+    # reported as candidate transients, so they are enriched in supernovae
     controls = pd.read_sql(f"""
         SELECT oid, night, p_model, p_sn, NULL tns_label, NULL tns_type,
                NULL labelled_at, stamp_path, cat_class, cat_source
@@ -93,28 +67,20 @@ def labelled_frame(conn, controls_per_night: int = 300) -> pd.DataFrame:
         ) WHERE rn <= ?
     """, conn, params=(controls_per_night,))
     controls["tns_label"] = 0
-    # Say which negatives are evidence-backed. confirm_negatives.py matches
-    # against SIMBAD, Milliquas and VSX, and only accepts types that positively
-    # cannot be a supernova -- stars and AGN. A galaxy match is deliberately
-    # NOT accepted, because a supernova sits in a galaxy and such a match is
-    # exactly what a real one looks like.
     controls["tns_type"] = controls.cat_class.map(
         {"star": "catalogued variable star / stellar source",
          "agn": "catalogued AGN / quasar"}).fillna("unlabelled (presumed not-SN)")
 
     d = pd.concat([positives, controls], ignore_index=True)
     d = d.drop_duplicates("oid").sort_values("night").reset_index(drop=True)
-    # An empty result comes back as object dtype, which makes nlargest and the
-    # numpy comparisons blow up rather than simply yield nothing. Everything
-    # downstream is written to cope with zero rows, so force the types.
+    # an empty result comes back as object dtype, which breaks nlargest
     for col in ("p_model", "p_sn", "tns_label"):
         d[col] = pd.to_numeric(d[col], errors="coerce")
     return d
 
 
 def recall_at(prob, y, threshold=0.5) -> tuple[int, int]:
-    """How many confirmed supernovae we flagged. Needs no negatives at all, so
-    it stays meaningful however lopsided the labelled sample is."""
+    """Needs no negatives, so it stays meaningful however lopsided the set is."""
     sn = y == 1
     return int((prob[sn] >= threshold).sum()), int(sn.sum())
 
@@ -122,19 +88,13 @@ def recall_at(prob, y, threshold=0.5) -> tuple[int, int]:
 def paired_interval(d: pd.DataFrame, n_boot: int = 2000) -> dict | None:
     """Error bars on the head-to-head, from a paired bootstrap.
 
-    The two headline AUCs are each computed on every object that model scored,
-    which is the right summary but NOT a comparison: they rest on different
-    populations, because the baseline is only fetched for a subset. A difference
-    is only meaningful on the objects BOTH models scored, resampled together so
-    their correlated errors cancel.
-
-    Without this the page quotes bare point estimates, and a difference of
-    +0.028 reads as settled when the interval very nearly touches zero.
+    Only on objects BOTH models scored: the two headline AUCs rest on different
+    populations, because the baseline is fetched for a subset.
     """
     sub = d[d.p_sn.notna()]
     y = sub.tns_label.to_numpy().astype(int)
-    # a bootstrap over a handful of objects reports an interval it has not
-    # earned -- this pipeline once computed an AUC against a single negative
+    # refuse to quote an interval this pipeline has not earned -- it once
+    # computed an AUC against a single negative
     if len(sub) < 20 or y.sum() < 5 or (y == 0).sum() < 5:
         return None
 
@@ -157,7 +117,11 @@ def paired_interval(d: pd.DataFrame, n_boot: int = 2000) -> dict | None:
 
 
 def cumulative_history(d: pd.DataFrame) -> list[dict]:
-    """Metrics over every object in the evaluation set up to each night."""
+    """Metrics over every object in the evaluation set up to each night.
+
+    Cumulative rather than per-night: TNS confirms a handful of objects a
+    night, so a nightly point is a coin flip on n=3.
+    """
     out = []
     for night in sorted(d.night.unique()):
         upto = d[d.night <= night]
@@ -169,9 +133,7 @@ def cumulative_history(d: pd.DataFrame) -> list[dict]:
                "model_auc": None, "baseline_auc": None}
         if y.sum() and (y == 0).sum():
             row["model_auc"] = round(float(auc(upto.p_model.to_numpy(), y)), 4)
-            # The baseline is only fetched for a subset, so score it on exactly
-            # the objects where both models have an opinion -- otherwise the two
-            # curves would be measured on different populations.
+            # score the baseline only where both have an opinion
             has = upto.p_sn.notna().to_numpy()
             if has.sum() and y[has].sum() and (y[has] == 0).sum():
                 row["baseline_auc"] = round(
@@ -214,9 +176,8 @@ def write_plot(history, path: Path, min_points: int = 2):
                  fontsize=12)
     ax.grid(alpha=0.25)
 
-    # Plot the CONFIRMED SUPERNOVA count, not the total. Controls are plentiful
-    # and cheap; spectroscopic confirmations are the scarce ingredient, and they
-    # are what actually determines whether a point means anything.
+    # confirmed SNe, not total: they are the scarce ingredient and they
+    # determine whether a point means anything
     ax2.bar(nights, [h["n_sn"] for h in history], color="0.6", width=0.6)
     ax2.set_ylabel("confirmed\nSNe", fontsize=8)
     ax2.grid(alpha=0.25, axis="y")
@@ -228,7 +189,7 @@ def write_plot(history, path: Path, min_points: int = 2):
 
 
 def stretch(plane):
-    """Percentile-clip then asinh, as in show_stamps.py."""
+    """Percentile-clip then asinh, for display only."""
     finite = plane[np.isfinite(plane)]
     if finite.size == 0:
         return np.zeros_like(plane)
@@ -241,11 +202,9 @@ def stretch(plane):
 
 
 def pick_highlights(d: pd.DataFrame, per_row: int) -> list[tuple]:
-    """The four cases worth looking at, most interesting first.
+    """The four cases worth looking at, errors first.
 
-    False alarms and misses come before hits deliberately: a gallery of
-    successes tells you nothing you did not already know from the AUC, whereas
-    the errors are where the model's actual behaviour is legible.
+    A gallery of successes tells you nothing the AUC did not.
     """
     have = d[d.stamp_path.notna()].copy()
     if have.empty:
@@ -254,10 +213,9 @@ def pick_highlights(d: pd.DataFrame, per_row: int) -> list[tuple]:
     fp = have[(have.tns_label == 0)].nlargest(per_row, "p_model")
     fn = have[(have.tns_label == 1)].nsmallest(per_row, "p_model")
     hit = have[(have.tns_label == 1)].nlargest(per_row, "p_model")
-    # Take the disagreements from BOTH directions, half each. Ranking by the
-    # raw gap looks neutral but is not: our model is the more confident of the
-    # two, so the largest gaps are nearly all cases where we scored high and
-    # ALeRCE low -- a gallery of our own wins.
+    # take disagreements from BOTH directions, half each: ranking by the raw
+    # gap looks neutral but our model is the more confident of the two, so the
+    # largest gaps would all be our own wins
     dis = have[have.p_sn.notna()].copy()
     if len(dis):
         half = max(1, per_row // 2)
@@ -327,8 +285,6 @@ INDEX = """<!doctype html>
 <html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ZTF supernova classifier — live</title>
-<!-- The pipeline runs once a night, so refreshing every 30 min is plenty to
-     keep an open tab current without hammering the host. -->
 <meta http-equiv="refresh" content="1800">
 <style>
  :root{{--fg:#16181d;--muted:#6b7280;--line:#e5e7eb;--bg:#fff;--card:#f9fafb;
@@ -485,14 +441,11 @@ def main(argv=None) -> int:
     made = write_highlights(d, args.db.parent, args.out / "highlights.png",
                             args.per_row)
 
-    # Show pipeline health on the public page. A visitor seeing "running" with a
-    # recent timestamp is what makes this read as live rather than as a snapshot
-    # someone committed once and forgot.
     health, health_class = pipeline_health()
     payload["status"] = health
 
-    # Only reference the gallery once it exists. Before the first labels arrive
-    # a hard-coded <img> would render as a broken-image icon on a public page.
+    # only reference the gallery once it exists, or it renders as a broken
+    # image icon on a public page
     gallery = ("""<h2>What the model actually saw</h2>
 <img src="highlights.png" alt="Example stamps the model classified">
 <p class="sub">Errors first — a gallery of successes would say nothing the AUC
@@ -504,9 +457,6 @@ scored the night they arrive; the Transient Name Server publishes what they
 actually were over the following weeks, and the gallery appears once there is
 truth to compare against.</p>""")
 
-    # Quote the interval, not the point estimate. A difference that nearly
-    # touches zero and one that is comfortably clear of it look identical as
-    # bare numbers, and only one of them supports a claim.
     if paired is None:
         ci_line = ('<p class="sub">Not enough confirmed objects yet to put an '
                    'error bar on the difference.</p>')

@@ -1,17 +1,10 @@
-"""Train a 3-channel CNN to classify SN vs not-SN on ALeRCE stamps.
+"""Train a 3-channel CNN to classify SN vs not-SN on ZTF stamps.
 
-Labels now come from reality, not from the baseline:
+Positives are TNS spectroscopically-confirmed supernovae, negatives are
+date-sampled stream objects, so the comparison against ALeRCE at the end is a
+real benchmark rather than a measure of how well we imitate it.
 
-  positives  data/manifest_positives.csv   TNS spectroscopically-confirmed SNe
-  negatives  data/manifest_unfiltered.csv  date-sampled stream objects
-
-Neither class is derived from ALeRCE's stamp_classifier, so the comparison
-against its p_sn at the end is a real benchmark rather than a measure of how
-well we imitate it.
-
-    python train.py                 # train, evaluate, save model.pth
     python train.py --epochs 60
-    python train.py --no-augment    # ablation
 """
 
 import argparse
@@ -37,14 +30,6 @@ DEFAULT_NEGATIVES = ("manifest_unfiltered.csv", "manifest_hard_negatives.csv")
 
 def load_dataset(positives="manifest_positives.csv",
                  negatives=DEFAULT_NEGATIVES):
-    """Combine TNS positives with stream and hard negatives into one array.
-
-    `positives` selects which epoch of the positive stamps to use.
-    manifest_positives_first.csv pins them to each object's first detection --
-    the epoch ALeRCE's stamp_classifier actually scored. The default
-    manifest_positives.csv is mixed-epoch and gives us an unearned advantage,
-    since ~25% of those stamps come from the last detection, near peak.
-    """
     parts = []
     pos = pd.read_csv(DATA / positives)
     pos["label"], pos["source"] = 1, "tns"
@@ -69,7 +54,6 @@ def load_dataset(positives="manifest_positives.csv",
 
 
 def split(n, test_frac=0.2):
-    """Random train/test index split; oids are unique so nothing leaks across."""
     rng = np.random.default_rng(SEED)
     order = rng.permutation(n)
     cut = int(n * (1 - test_frac))
@@ -77,20 +61,16 @@ def split(n, test_frac=0.2):
 
 
 def normalise(X_train, X_test):
-    """asinh-compress, then standardise per channel using TRAIN statistics only.
+    """asinh-compress, then standardise per channel on TRAIN statistics only.
 
-    asinh (not log) because the difference channel is ~50% negative by
-    construction. Train-only stats because computing them over both splits would
-    leak test information. NaN -> 0 last, so missing pixels land on the channel
-    mean instead of dragging it.
-
-    Returns the stats too: inference on new alerts must reuse the exact values
-    the model was trained with, or the network sees differently-scaled data than
-    it learned on. They are saved into the checkpoint for that reason.
+    asinh rather than log because the difference channel is ~50% negative by
+    construction. The stats are returned because inference must reuse the exact
+    values the model was trained with.
     """
     X_train, X_test = np.arcsinh(X_train), np.arcsinh(X_test)
     mean = np.nanmean(X_train, axis=(0, 2, 3), keepdims=True)
     std = np.nanstd(X_train, axis=(0, 2, 3), keepdims=True)
+    # NaN -> 0 last, so missing pixels land on the channel mean
     return (np.nan_to_num((X_train - mean) / std),
             np.nan_to_num((X_test - mean) / std), mean, std)
 
@@ -101,17 +81,14 @@ def apply_normalisation(X, mean, std):
 
 
 def augment(batch):
-    """Random flips and 90-degree rotations, applied per batch on device.
+    """Random flips and 90-degree rotations: the dihedral group of the square.
 
-    Physically justified rather than a generic trick: a stamp has no preferred
-    orientation -- rotating the sky does not change what a supernova is. (Unlike
-    MNIST, where flipping a digit changes its meaning.) This is the dihedral
-    group of the square, so it multiplies the effective dataset by 8 for free.
+    Valid here because a stamp has no preferred orientation.
     """
     if torch.rand(1).item() < 0.5:
-        batch = torch.flip(batch, dims=[3])          # left-right
+        batch = torch.flip(batch, dims=[3])
     if torch.rand(1).item() < 0.5:
-        batch = torch.flip(batch, dims=[2])          # up-down
+        batch = torch.flip(batch, dims=[2])
     k = int(torch.randint(0, 4, (1,)).item())
     if k:
         batch = torch.rot90(batch, k, dims=[2, 3])
@@ -121,10 +98,6 @@ def augment(batch):
 # ---------------------------------------------------------------- model
 
 class StampCNN(nn.Module):
-    """Three conv blocks. Bigger than the MNIST seed because ~7k real examples
-    outrun the 6k-parameter version immediately; BatchNorm keeps it trainable
-    and dropout holds back the overfitting we measured earlier."""
-
     def __init__(self, dropout=0.3):
         super().__init__()
 
@@ -140,7 +113,7 @@ class StampCNN(nn.Module):
             block(3, 32),          # [B,3,63,63]  -> [B,32,31,31]
             block(32, 64),         #              -> [B,64,15,15]
             block(64, 128),        #              -> [B,128,7,7]
-            nn.AdaptiveAvgPool2d((3, 3)),   # -> [B,128,3,3], size-independent
+            nn.AdaptiveAvgPool2d((3, 3)),
         )
         self.head = nn.Sequential(
             nn.Flatten(),
@@ -158,12 +131,7 @@ class StampCNN(nn.Module):
 # ---------------------------------------------------------------- metrics
 
 def auc(prob, y):
-    """Area under the ROC curve via the rank identity (no sklearn needed).
-
-    The headline metric here: threshold-free, and invariant to class balance,
-    which matters because our test split is ~50/50 while the real stream is
-    ~0.2% supernovae.
-    """
+    """Area under the ROC curve via the rank identity."""
     order = prob.argsort()
     ranks = np.empty(len(prob), dtype=np.float64)
     ranks[order] = np.arange(1, len(prob) + 1)
@@ -208,8 +176,6 @@ def evaluate(model, loader):
 
 
 def train(model, loader, test_loader, epochs, use_augment=True, weight=None):
-    # the positive set is now ~4x the negative set, so without weighting the
-    # model drifts toward calling everything a supernova
     loss_fn = nn.CrossEntropyLoss(weight=weight)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
@@ -294,14 +260,12 @@ def main():
     prob_train, truth_train = evaluate(model, train_eval)
     threshold = best_threshold(prob_train, truth_train)
 
-    # the baseline, on exactly the same objects and the same TNS truth
     baseline = frame.p_sn.to_numpy()
     ok = ~np.isnan(baseline[test_idx])
 
-    # Tune the BASELINE's threshold too, on train, exactly as we tuned ours.
-    # ALeRCE's probabilities are calibrated far more conservatively -- its best
-    # threshold is ~0.12, not 0.5. Comparing our tuned model against its untuned
-    # default manufactures a win that is not there.
+    # Tune the BASELINE's threshold on train too. ALeRCE is calibrated far more
+    # conservatively (its best cut is ~0.12), so comparing our tuned model
+    # against its untuned default manufactures a win that is not there.
     b_train = baseline[train_idx]
     b_ok = ~np.isnan(b_train)
     b_threshold = best_threshold(b_train[b_ok], y_train[b_ok])
@@ -317,11 +281,6 @@ def main():
     report("our CNN @0.50", prob[ok], truth[ok])
     report("ALeRCE @0.50", baseline[test_idx][ok], truth[ok])
 
-    # Nuisance baseline: five summary numbers off the pixels, no morphology.
-    # Our two classes come from different selection pipelines, so they differ in
-    # brightness and environment as well as in being/not-being supernovae. If
-    # this scores close to the CNN, most of the CNN's AUC is sample artefact
-    # rather than anything it learned about what a supernova looks like.
     print("\n  -- sanity baselines --")
     report("always-predict-SN", np.ones_like(prob[ok], dtype=float),
            truth[ok], 0.5)

@@ -1,22 +1,9 @@
 """Join TNS ground-truth classifications onto our ALeRCE candidates.
 
-TNS publishes its whole public catalogue as a daily CSV, plus daily/hourly delta
-files. That is far better than per-object API calls: one download, joined
-locally, no rate limits. The delta files are also exactly the delayed-label
-mechanism the project needs -- fetch yesterday's delta, join it onto stored
-predictions, retrain.
+Writes data/tns_labels.csv separately rather than into manifest.csv, which
+fetch_data.py rewrites wholesale and would silently wipe.
 
-The join key is the CSV's `internal_names` column, which lists the survey names
-an object was reported under (e.g. "ZTF18abcdefg, ATLAS18xyz"). Our oids are ZTF
-internal names, so they match directly.
-
-Output is data/tns_labels.csv, deliberately NOT merged into manifest.csv --
-fetch_data.py rewrites that file wholesale and would silently wipe the labels.
-Keeping them separate also mirrors how Phase 2 works, where labels arrive on
-their own schedule long after the stamps.
-
-Credentials come from the environment (never commit these):
-    TNS_BOT_ID, TNS_BOT_NAME, TNS_API_KEY
+Needs TNS_BOT_ID, TNS_BOT_NAME, TNS_API_KEY in the environment.
 """
 
 from __future__ import annotations
@@ -35,13 +22,10 @@ import requests
 BASE = "https://www.wis-tns.org/system/files/tns_public_objects"
 DATA = Path("data")
 
-# A TNS type of "SN Ia", "SN IIn", "SLSN-I" etc. is a spectroscopically confirmed
-# supernova -> positive.
 SN_PREFIXES = ("SN ", "SLSN")
 
-# Confirmed to be something else -> genuine negative. Anything not in either
-# group (including a blank type, i.e. a reported-but-unclassified AT) stays
-# unlabeled rather than being guessed at.
+# a type in neither group (including a blank one, i.e. reported but not yet
+# classified) stays unlabelled rather than being guessed at
 NON_SN_TYPES = {
     "AGN", "Blazar", "CV", "Galaxy", "Impostor-SN", "LBV", "Light-Echo",
     "M dwarf", "Nova", "QSO", "Star", "TDE", "Varstar", "WR", "XRB",
@@ -51,11 +35,8 @@ NON_SN_TYPES = {
 def _load_dotenv() -> None:
     """Read .env if the variables are not already exported.
 
-    nightly.sh sources .env before it runs anything, so the cron path always has
-    credentials. Running a script by hand did not, which meant the same command
-    worked from cron and failed from a shell -- a confusing difference with no
-    good reason for existing. Values already in the environment win, so an
-    explicit `export` or `set -a; . .env` still overrides the file.
+    nightly.sh sources .env, so cron had credentials and a hand-run command did
+    not. Values already in the environment win, so an export still overrides.
     """
     path = Path(__file__).parent / ".env"
     if not path.exists():
@@ -129,9 +110,8 @@ def classify(tns_type) -> float:
 def build_labels(tns: pd.DataFrame, oids: set[str] | None) -> pd.DataFrame:
     """Explode internal_names and keep ZTF rows.
 
-    oids=None keeps every ZTF-named object in TNS rather than only our current
-    candidates -- that is the pool to build a real training set from, since the
-    labels already exist for thousands of past supernovae.
+    oids=None keeps every ZTF-named object in TNS, not just our candidates --
+    that is the pool to build a training set from.
     """
     subset = tns[["name", "name_prefix", "type", "internal_names"]].copy()
     subset = subset[subset.internal_names.notna()]

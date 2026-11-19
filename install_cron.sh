@@ -4,23 +4,19 @@
 #   bash install_cron.sh          # install
 #   bash install_cron.sh --remove # uninstall
 #
-# One entry, not three. nightly.sh sequences ingest -> label -> dashboard
-# itself, which keeps the ordering explicit and means only one thing can be
-# holding the database at a time.
+# One entry, not three: nightly.sh sequences the stages itself, so only one
+# thing can hold the database at a time.
 
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 REPO="$PWD"
 MARKER="# ztf-supernova-classifier nightly"
-# 08:30 UTC: ZTF publishes the previous night around 07:10 UTC, so this leaves
-# room for the file to appear without waiting a whole extra day.
+# 08:30 UTC: ZTF publishes the previous night around 07:10 UTC.
 #
-# Deliberately NOT wrapped in flock here: nightly.sh takes the lock itself.
+# Deliberately NOT wrapped in flock -- nightly.sh takes the lock itself, and
 # flock() treats separate file descriptors independently even inside one
-# process, so an outer `flock -n .nightly.lock bash nightly.sh` would make the
-# script's own lock attempt fail -- it would print "another nightly run is still
-# going", exit 0, and never actually run, with a log that looked entirely
-# normal every single day.
+# process, so an outer flock would make the script's own attempt fail: it
+# would report a run already going, exit 0, and never run, every single day.
 ENTRY="30 8 * * * cd $REPO && bash nightly.sh $MARKER"
 
 current=$(crontab -l 2>/dev/null || true)

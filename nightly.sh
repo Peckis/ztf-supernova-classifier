@@ -1,23 +1,11 @@
 #!/usr/bin/env bash
-# The whole loop, once a night, from cron. Nothing here needs a human.
+# The whole loop, once a night, from cron: ingest last night, attach any TNS
+# labels, rebuild the dashboard. Install with install_cron.sh.
 #
-#   ingest last night  ->  attach any TNS labels  ->  rebuild the dashboard
-#
-# Install with:  bash install_cron.sh
-# Run by hand :  bash nightly.sh
-#
-# Four things this handles that a naive three-line crontab does not:
-#
-#  1. cron does NOT source ~/.profile, so TNS_API_KEY would be unset and every
-#     label run would fail silently. Credentials come from .env instead.
-#  2. TNS keeps delta files for only two weeks. A single failed night would lose
-#     those labels forever, so we replay the last LOOKBACK_DAYS every time.
-#     apply_labels() skips rows whose type has not changed, so replaying is
-#     cheap and self-healing.
-#  3. A 16 GB night can still be downloading when the next run fires. flock
-#     makes a second instance exit rather than fight over the database.
-#  4. A failed ingest must not stop labelling and export -- yesterday's alerts
-#     are not a prerequisite for labelling alerts from three weeks ago.
+# Not a three-line crontab because cron does not source ~/.profile (so .env),
+# TNS keeps deltas only two weeks (so the LOOKBACK_DAYS replay), a 16 GB night
+# can still be downloading when the next run fires (so flock), and a failed
+# ingest must not stop labelling alerts from three weeks ago.
 
 set -uo pipefail          # deliberately not -e: each stage reports and continues
 
@@ -35,10 +23,8 @@ LOG="$LOG_DIR/nightly-$(date -u +%Y%m%d).log"
 EVENTS="$LOG_DIR/events.tsv"
 exec >>"$LOG" 2>&1
 
-# Structured event stream for status.py. Tab-separated rather than JSON so the
-# shell can append a line without spawning anything or escaping quotes; the
-# message has tabs and newlines stripped so one event is always one line.
-#   event LEVEL STAGE MESSAGE       LEVEL in OK|WARN|ERROR
+# event stream for status.py: event LEVEL STAGE MESSAGE, LEVEL in OK|WARN|ERROR.
+# Tab-separated, not JSON, so appending needs no quoting or subprocess.
 event() {
   printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" \
     "$(printf '%s' "$3" | tr '\t\n' '  ')" >>"$EVENTS"
@@ -50,9 +36,8 @@ event OK run "started"
 echo "================================================================"
 
 # --- only one instance at a time ---------------------------------------
-# Fail OPEN, not closed. Treating a missing flock as "already locked" would make
-# the job silently never run while the logs looked entirely normal -- a far
-# worse outcome than the rare overlap locking is meant to prevent.
+# fail OPEN: treating a missing flock as "already locked" would make the job
+# silently never run while the logs looked normal, which is worse than overlap
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$REPO/.nightly.lock"
   if ! flock -n 9; then
@@ -80,8 +65,8 @@ done
 status=0
 
 # --- 1. ingest any night we are missing --------------------------------
-# Ask the database which nights it already has rather than assuming last night
-# succeeded. This backfills a gap after an outage without any bookkeeping.
+# ask the database which nights it has rather than assuming last night
+# succeeded, so a gap after an outage backfills itself
 missing=$("$PY" - <<EOF
 import sqlite3, datetime, pathlib
 db = pathlib.Path("data/pipeline.db")
@@ -108,8 +93,7 @@ else
       echo "   ok"
       event OK ingest "$night ingested"
     else
-      # An empty night (weather) is published as a 74-byte placeholder and is a
-      # perfectly normal outcome, so this is a warning rather than a failure.
+      # an empty night (weather) is a 74-byte placeholder and perfectly normal
       echo "   ingest failed or night was empty; continuing"
       event WARN ingest "$night failed or empty (weather nights are normal)"
     fi
@@ -126,8 +110,8 @@ else
     if "$PY" -u label_from_tns.py --delta "$day"; then
       event OK labels "delta $day applied"
     else
-      # A delta that is not published yet, or has aged out of TNS's two-week
-      # window, is expected rather than broken -- the replay covers it.
+      # a delta not yet published, or aged out of TNS's two-week window, is
+      # expected rather than broken: the replay covers it
       echo "   delta $day unavailable; continuing"
       event WARN labels "delta $day unavailable"
     fi
@@ -135,9 +119,8 @@ else
 fi
 
 # --- 2b. confirm negatives against external catalogues ------------------
-# Upgrades "presumed not a supernova because they are rare" into "catalogued
-# variable star". Only touches the control objects the dashboard evaluates, and
-# only ones without a verdict yet, so it stays small after the first run.
+# only the control objects the dashboard evaluates, and only ones without a
+# verdict yet, so it stays small after the first run
 echo "-- confirming negatives against SIMBAD / Milliquas / VSX"
 if "$PY" -u confirm_negatives.py --limit 3000; then
   event OK confirm "catalogue crossmatch done"
@@ -158,9 +141,8 @@ else
 fi
 
 # --- 3b. publish it, if a target repo is configured ---------------------
-# Optional: only runs once publish_dashboard.sh --setup has been done. A
-# publish failure is a WARNING, not an error -- the pipeline itself is fine and
-# the next run will push the same content again.
+# only runs once publish_dashboard.sh --setup has been done. A publish failure
+# is a warning: the pipeline is fine and the next run pushes the same content.
 if [ -d "$REPO/.publish" ] || [ -n "${PUBLISH_REPO:-}" ]; then
   echo "-- publish"
   if bash publish_dashboard.sh; then
@@ -172,8 +154,7 @@ if [ -d "$REPO/.publish" ] || [ -n "${PUBLISH_REPO:-}" ]; then
 fi
 
 # --- 4. tell the human when a retrain is worth doing --------------------
-# Retraining is a laptop job (the server has no usable GPU) and is only worth
-# doing when enough new truth has arrived to move the model.
+# retraining is a laptop job: the server has no usable GPU
 "$PY" - <<'EOF'
 import sqlite3, pathlib
 db = pathlib.Path("data/pipeline.db")

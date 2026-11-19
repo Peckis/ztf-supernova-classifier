@@ -1,13 +1,9 @@
 """Check whether the two classes differ in nuisance ways a CNN could exploit.
 
-Positives and negatives come from different pipelines (TNS-confirmed objects
-fetched by name vs date-sampled stream alerts). If they also differ in sky
-background, source brightness, or noise level, the network can score well by
-learning "brighter = supernova" instead of morphology -- and the benchmark
-would be measuring the wrong thing entirely.
-
-This measures properties straight off the pixels, because that is what the model
-actually sees.
+Positives and negatives come from different pipelines, so if they also differ
+in sky background, brightness or noise, the network can score well by learning
+"brighter = supernova" instead of what a supernova looks like. Measured off the
+pixels, because that is what the model sees.
 
     python audit_shortcuts.py
 """
@@ -65,8 +61,7 @@ def main():
     for c in cols:
         pos = f.loc[f.label == 1, c].dropna()
         neg = f.loc[f.label == 0, c].dropna()
-        # AUC of this single feature: 0.5 = tells you nothing, 1.0 = separates
-        # the classes perfectly on its own, i.e. a free shortcut
+        # AUC of this one feature: 1.0 would separate the classes on its own
         vals = np.concatenate([pos, neg])
         y = np.concatenate([np.ones(len(pos)), np.zeros(len(neg))])
         order = vals.argsort()
@@ -81,9 +76,8 @@ def main():
     print("morphology. sky near 0.5 means both samples share observing")
     print("conditions, which is the failure mode that would matter most.")
 
-    # The decisive test: how far do these five nuisance numbers get on their own?
-    # If a tiny model on them alone reaches the CNN's AUC, then the CNN is
-    # mostly learning sample artefacts, not what a supernova looks like.
+    # the decisive test: if a tiny model on these five numbers alone reaches
+    # the CNN's AUC, the CNN is mostly learning how the samples were collected
     from sklearn.ensemble import HistGradientBoostingClassifier
     from sklearn.model_selection import cross_val_score
 

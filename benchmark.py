@@ -1,17 +1,7 @@
 """Head-to-head against the ALeRCE stamp_classifier, with error bars.
 
-Reads data/predictions.csv (written by train.py) and answers one question
-honestly: does our model actually beat the broker's, or is the gap noise?
-
-Three things this does that a bare accuracy number does not:
-
-  1. Bootstraps confidence intervals on both AUCs *and on their difference*,
-     resampling the same objects for both models so the comparison is paired.
-  2. Projects precision to the real ~0.2% base rate. The test split is heavily
-     enriched in supernovae; precision measured on it is meaningless for an
-     observer deciding where to point a telescope.
-  3. Reports a nuisance floor -- how well simple photometry does with no image
-     at all -- so a high AUC cannot be mistaken for morphological skill.
+Reads data/predictions.csv and answers one question: does our model actually
+beat the broker's, or is the gap noise?
 
     python benchmark.py
 """
@@ -41,9 +31,8 @@ def bootstrap_auc(prob_a, prob_b, y, n_boot=2000, seed=0):
     """Paired bootstrap: resample objects, score both models on the same draw.
 
     Pairing matters. The two models are evaluated on identical objects, so their
-    errors are correlated; comparing independent confidence intervals would
-    overstate the uncertainty on the *difference*, which is the quantity we
-    actually care about.
+    errors are correlated and independent intervals would overstate the
+    uncertainty on the difference.
     """
     rng = np.random.default_rng(seed)
     n = len(y)
@@ -80,13 +69,10 @@ def best_threshold(prob, y):
 
 
 def reweighted_report(d, t_ours, t_theirs, unfiltered=DATA / "manifest_unfiltered.csv"):
-    """Re-mix the negative types to the proportions a real stream actually has.
+    """Re-mix the negative types to the proportions a real stream has.
 
-    This is the number that matters, and it can differ wildly from the raw one.
-    Hard negatives are deliberately ENRICHED for training -- they were 59% of
-    our test negatives while a genuine stream sample is only ~16% long-span.
-    Since the model was trained on those same hard negatives, leaving them
-    over-represented in the test set flatters exactly what we optimised for:
+    Hard negatives are deliberately enriched for training. Leaving them
+    over-represented in the test set flatters exactly what we optimised for --
     it once turned a 2.3x practical deficit into an apparent AUC win.
     """
     if not unfiltered.exists() or "source" not in d.columns:
@@ -131,7 +117,6 @@ def main():
     print(f"test objects: {len(y)}   confirmed SNe: {int(y.sum())} "
           f"({y.mean():.1%})   negatives: {int((y == 0).sum())}")
 
-    # --- AUC with paired bootstrap -------------------------------------
     a_s, b_s, d_s = bootstrap_auc(ours, theirs, y, n_boot=args.boot)
     lo_a, hi_a = np.percentile(a_s, [2.5, 97.5])
     lo_b, hi_b = np.percentile(b_s, [2.5, 97.5])
@@ -148,7 +133,6 @@ def main():
     else:
         print("  -> the interval spans zero: this is a TIE, do not claim a win")
 
-    # --- operating points, both tuned ----------------------------------
     t_ours, t_theirs = best_threshold(ours, y), best_threshold(theirs, y)
     print("\n--- operating points (each model at its own best-F1 threshold) ---")
     print(f"{'model':<26} {'thr':>5} {'recall':>7} {'FPR':>8} {'prec':>7}  prec@0.2%")
@@ -169,7 +153,6 @@ def main():
         print(f"  {name:<8} finds {found:>5.0f}/200 SNe, {false:>6.0f} false alarms "
               f"({false / max(found, 1):>5.1f} per real SN)")
 
-    # --- breakdown by where the negatives came from --------------------
     if "source" in d.columns:
         print("\n--- false-positive rate by negative type ---")
         for src, g in d[d.label == 0].groupby("source"):

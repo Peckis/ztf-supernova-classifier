@@ -1,20 +1,14 @@
 """Ingest a run of past nights, so the dashboard has real numbers today.
 
-The live loop would take months to accumulate labels. The archive holds 2,198
-nights going back to 2018, and TNS has already followed those up -- so ingesting
-older nights gives the accuracy plot months of hindsight immediately.
+Nights old enough that TNS has already followed them up give the accuracy plot
+months of hindsight immediately, instead of waiting for the live loop.
 
     python backfill_nights.py --nights 8 --start 20250101 --end 20260315
-    python backfill_nights.py --nights 12 --strategy smallest --dry-run
 
-Downloads one night at a time and deletes it before fetching the next, so peak
-disk is one tarball plus the kept stamps. Nights already in the runs table are
-skipped, so an interrupted run resumes for free.
-
-On picking nights: --strategy spread is the default and takes them evenly across
-the window. --strategy smallest downloads far less, but small nights are small
-because of weather, so it quietly selects for poor observing conditions -- fine
-for a plumbing test, misleading for a benchmark.
+One tarball at a time, deleted before the next; nights already in the runs
+table are skipped, so an interrupted run resumes for free. --strategy smallest
+downloads far less, but small nights are small because of weather, so it
+quietly selects for poor observing conditions.
 """
 
 from __future__ import annotations
@@ -45,8 +39,8 @@ ROW = re.compile(
 def available_nights(min_gb: float = 0.5) -> list[tuple[str, float]]:
     """Every night in the archive index with its size in GB.
 
-    Nights with no observations are published as 74-byte placeholders, so
-    anything tiny is filtered out rather than downloaded and found empty.
+    Nights with no observations are published as 74-byte placeholders, hence
+    the size floor.
     """
     html = requests.get(INDEX_URL, timeout=120).text
     out = []

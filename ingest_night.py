@@ -1,25 +1,9 @@
-"""Phase 2, step 1: score one night of the ZTF alert stream and store it.
+"""Score one night of the ZTF alert stream and store the predictions.
 
-Runs the CNN over every alert in a nightly public archive tarball and writes the
-predictions to SQLite. Ground truth is not available yet -- TNS confirms these
-objects over the following weeks, and label_from_tns.py fills it in later. That
-delay is the whole point of the project.
-
-Two sizing facts drive the design, both measured rather than assumed:
-
-  * A night holds ~55,000 alerts on a 2.6 GB file, up to ~340,000 on a 16 GB one.
-  * Stamps are 47 KB each, so keeping all of them would be ~1 TB/year.
-
-So predictions for every alert go to the database (~200 bytes each), and stamps
-are kept only for the top --keep-stamps candidates by model score. With recall
-~0.97, the handful TNS later confirms will almost always be inside that set,
-which is what retraining needs.
+Ground truth does not exist yet; label_from_tns.py fills it in weeks later,
+which is the point of the project.
 
     python ingest_night.py --date 20260110
-    python ingest_night.py --tarball part.tar.gz --dry-run
-
-The tarball is streamed, never unpacked, and deleted afterwards unless
---keep-tarball is given.
 """
 
 from __future__ import annotations
@@ -57,13 +41,13 @@ CREATE TABLE IF NOT EXISTS alerts (
     dec           REAL,
     magpsf        REAL,
     fid           INTEGER,
-    rb            REAL,                  -- ZTF's own real/bogus score
+    rb            REAL,
     drb           REAL,
     ndethist      INTEGER,
-    p_model       REAL,                  -- our CNN
+    p_model       REAL,
     model_version TEXT,
     stamp_path    TEXT,                  -- NULL unless this alert made the cut
-    -- everything below arrives later, from TNS and (on demand) from ALeRCE
+    -- filled in later, from TNS and (on demand) from ALeRCE
     tns_name      TEXT,
     tns_type      TEXT,
     tns_label     INTEGER,
@@ -88,17 +72,10 @@ CREATE TABLE IF NOT EXISTS runs (
 
 
 def connect(path: Path = DB_PATH) -> sqlite3.Connection:
-    """Open the pipeline database, creating it on first use.
-
-    WAL is worth the one line. It lets status.py read while a night is being
-    written instead of hitting SQLITE_BUSY, and it recovers a half-finished
-    transaction from its own log after a hard power cut. synchronous=NORMAL is
-    the right pairing: under WAL it still survives an OS crash or power loss,
-    and the alternative costs an fsync per commit for a durability guarantee we
-    do not need -- a lost final commit just means the night gets re-ingested.
-    """
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=30)
+    # WAL lets status.py read during a write and recovers from a hard power cut;
+    # NORMAL still survives that, without an fsync per commit
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
@@ -106,13 +83,10 @@ def connect(path: Path = DB_PATH) -> sqlite3.Connection:
 
 
 def load_model(checkpoint: Path, device: str):
-    """Load weights AND the normalisation they were trained with.
-
-    Refuses a bare state_dict: a model applied with the wrong statistics gives
-    plausible-looking probabilities that are quietly meaningless, which is worse
-    than an error.
-    """
+    """Load weights AND the normalisation they were trained with."""
     blob = torch.load(checkpoint, map_location=device, weights_only=False)
+    # a model applied with the wrong statistics gives plausible-looking
+    # probabilities that are quietly meaningless, which is worse than an error
     if not isinstance(blob, dict) or "state_dict" not in blob:
         sys.exit(f"{checkpoint} predates normalisation-saving. Re-run train.py "
                  f"so the checkpoint carries norm_mean/norm_std.")
@@ -139,8 +113,7 @@ def ingest(tarball: Path, night: str, model, mean, std, version: str,
     started = time.perf_counter()
     n_alerts = n_unusable = 0
     pending, rows = [], []
-    # bounded min-heap of the best-scoring alerts, so memory stays flat no
-    # matter how large the night is
+    # bounded min-heap, so memory stays flat however large the night is
     best: list = []
 
     def flush():
@@ -164,13 +137,9 @@ def ingest(tarball: Path, night: str, model, mean, std, version: str,
     for packet in iter_packets(tarball):
         c = packet.get("candidate", {})
 
-        # Only score alerts from objects the model was trained to judge.
-        # We trained on FIRST-detection stamps, where ndethist is ~1. Two thirds
-        # of the stream is repeat detections of long-known objects (ndethist in
-        # the hundreds), which is far outside that distribution -- and it shows:
-        # the model gave 0.9988 to the 367th detection of a known AGN. An early
-        # classifier's job is new objects, so anything already well-known is
-        # skipped rather than scored badly.
+        # We trained on FIRST detections. Two thirds of the stream is repeat
+        # detections of long-known objects, far outside that distribution --
+        # an early version gave 0.9988 to the 367th detection of a known AGN.
         nd = c.get("ndethist")
         if max_ndethist and nd is not None and nd > max_ndethist:
             n_skipped += 1
@@ -259,9 +228,8 @@ def main(argv=None) -> int:
     if args.date:
         night = args.date
     else:
-        # pull the date out of the filename rather than slicing blindly -- a
-        # wrong night silently files the alerts under a bogus date, and the
-        # runs table would then show a gap that never gets re-ingested
+        # a wrong night files alerts under a bogus date, and the runs table
+        # would then show a gap that never gets re-ingested
         found = re.search(r"(\d{8})", args.tarball.name)
         if not found:
             parser.error(f"cannot find a YYYYMMDD date in {args.tarball.name}; "

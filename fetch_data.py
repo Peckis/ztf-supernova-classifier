@@ -1,24 +1,13 @@
-"""Fetch labeled ZTF stamp cutouts from the ALeRCE broker.
+"""Fetch labelled ZTF stamp cutouts from the ALeRCE broker.
 
-For each object we pull the three 63x63 cutouts (science / template / difference)
-and stack them into a single [3, 63, 63] float32 array -- the same layout an RGB
-image has, which is why the MNIST CNN transfers over with only conv1 changing
-from 1 input channel to 3.
+Writes one [3, 63, 63] float32 array per object to data/stamps/<oid>.npy, with
+a row each in data/manifest.csv.
 
-Outputs
--------
-data/stamps/<oid>.npy   one [3, 63, 63] float32 array per object
-data/manifest.csv       one row per object: label, ALeRCE baseline probability,
-                        sky position, and the path to the .npy
+    python fetch_data.py --inspect ZTF17aaaazwi
 
-Run `python fetch_data.py --inspect ZTF17aaaazwi` to dump one object's stamps
-without downloading a dataset.
-
-Note on labels: the `label` column comes from ALeRCE's own stamp_classifier,
-i.e. from the very baseline we intend to beat. It is a *proxy* label, good
-enough to get the pipeline and the CNN working, but a model trained on it can
-at best imitate the baseline. Real ground truth arrives later from TNS
-(see tns_label, left empty here -- the ALeRCE client exposes no TNS field).
+The `label` column is a PROXY: it comes from ALeRCE's own stamp_classifier,
+the baseline we intend to beat, so a model trained on it can at best imitate
+that baseline. Real ground truth arrives later from TNS via fetch_tns.py.
 """
 
 from __future__ import annotations
@@ -40,59 +29,49 @@ from alerce.exceptions import (CandidError, FormatValidationError,
                                ObjectNotFoundError, ParseError)
 from tqdm import tqdm
 
-# Permanent failures: the object genuinely is not there, or the request is
-# malformed. Retrying these is pure waste -- and with a long backoff it is
-# expensive waste. A 404 once cost 85s of sleeping before we gave up on it.
-# BadGzipFile means the API returned a JSON error where FITS bytes should be,
-# i.e. no stamps are stored for that particular candid. Also permanent -- and
-# expensive to get wrong, since these are common when asking for a specific
-# epoch rather than the default one.
+# permanent failures, so retrying one costs 85s of backoff for nothing.
+# BadGzipFile means a JSON error came back where FITS bytes should be, i.e. no
+# stamps stored for that candid -- common when asking for a specific epoch.
 PERMANENT_ERRORS = (ObjectNotFoundError, CandidError, FormatValidationError,
                     ParseError, gzip.BadGzipFile)
 
-# these fetches run for hours -- show rate and ETA, and keep it readable when
-# stdout is a log file rather than a terminal
+# these run for hours, and stdout is usually a log file, not a terminal
 BAR = ("{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
        "{postfix}")
 
-# The ALeRCE FITS cards use a >8 char keyword (STAMP_TYPE), which astropy warns
-# about on every single download. The files are fine; silence the noise.
+# ALeRCE's FITS cards use a >8 char keyword (STAMP_TYPE), which astropy warns
+# about on every download. The files are fine.
 warnings.filterwarnings("ignore", module="astropy.io.fits")
 
-# Channel order in the stacked array. We look these up by the STAMP_TYPE header
-# rather than trusting HDU order, so a broker-side reordering can't silently
-# scramble the channels.
+# looked up by the STAMP_TYPE header, not by HDU order, so a broker-side
+# reordering cannot silently scramble the channels
 CHANNELS = ("science", "template", "difference")
 STAMP_SIZE = 63  # verified against live data; see --inspect
 
-# ZTF marks "no data" pixels inconsistently: NaN in the science/difference
-# planes but FITS null padding (-FLT_MAX, ~-3.4e38) in the template plane. Left
-# alone, that sentinel is a finite float the CNN will happily ingest and blow
-# up on. We normalise anything below this to NaN so missing data has exactly
-# one representation downstream.
+# ZTF marks "no data" as NaN in some planes and FITS null padding (-FLT_MAX,
+# ~-3.4e38) in others. That sentinel is a finite float the CNN would ingest and
+# blow up on, so anything below this becomes NaN: one representation only.
 SENTINEL_THRESHOLD = -1e30
 
 # ALeRCE's stamp_classifier (our baseline) emits exactly these classes.
 STAMP_CLASSES = ("SN", "AGN", "VS", "asteroid", "bogus")
 
-# Objects carry stamp_classifier results under several versions, and coverage is
-# uneven -- most have 1.0.4, some only 1.0.0. Benchmarking has to pick one
-# consistently, so we take the first version available in this order and record
-# which one was used. Probabilities sum to 1 within a version.
+# coverage is uneven (most objects have 1.0.4, some only 1.0.0) and
+# probabilities only sum to 1 within a version, so take the first available in
+# this order and record which one was used
 VERSION_PREFERENCE = ("stamp_classifier_1.0.4", "stamp_classifier_1.0.0")
 
 MANIFEST_COLUMNS = [
     "oid",
     "label",
     "alerce_class",
-    # probability of alerce_class -- NOT of SN. For a bogus object this is
-    # P(bogus). Use p_sn for anything that compares against our model.
+    # probability of alerce_class, NOT of SN: for a bogus object this is
+    # P(bogus). Comparisons against our model use p_sn.
     "alerce_class_probability",
     "p_sn",
     "p_sn_version",
-    # no tns_label column here on purpose -- ground truth lives in
-    # tns_labels.csv, written by fetch_tns.py. A placeholder here would collide
-    # with the real column on merge and get silently suffixed to tns_label_x.
+    # no tns_label column on purpose: a placeholder would collide with the real
+    # one from tns_labels.csv on merge and be silently suffixed to tns_label_x
     "ra",
     "dec",
     "ndet",
@@ -107,11 +86,10 @@ MANIFEST_COLUMNS = [
 class RateLimiter:
     """Global cap on requests per second, shared across worker threads.
 
-    Learned the hard way: a 24-object burst at 8 threads scaled linearly with no
-    errors, which looked like "not rate-limited". Running 14,574 objects the same
-    way produced 10,453 APIErrors and got the query endpoint refusing us
-    entirely. Short bursts never reveal a *sustained*-rate limit. A sequential
-    run (~0.9 req/s) was demonstrably fine for 3 hours, so that is the anchor.
+    A 24-object burst at 8 threads scaled linearly with no errors; the same
+    settings over 14,574 objects produced 10,453 APIErrors and got the query
+    endpoint to refuse us. Short bursts cannot reveal a SUSTAINED-rate limit,
+    so the anchor is a sequential run (~0.9 req/s) that held for 3 hours.
     """
 
     def __init__(self, per_second: float):
@@ -130,16 +108,16 @@ class RateLimiter:
             time.sleep(sleep_for)
 
 
-# Default 2 req/s: about twice the rate a 3-hour sequential run sustained
-# without a single throttle, and ~8x below what got us blocked.
+# 2 req/s: twice what a 3-hour sequential run sustained without a throttle,
+# and ~8x below what got us blocked
 LIMITER = RateLimiter(2.0)
 
 
 def _retry(fn, *args, attempts: int = 4, **kwargs):
     """Call fn behind the rate limiter, backing off hard on failure.
 
-    Backoff is deliberately long (5s, 20s, 60s). When the server is throttling,
-    retrying after 1-2 seconds just adds to the load that caused the problem.
+    5s/20s/60s: when the server is throttling, a 1-2s retry adds to the load
+    that caused the problem.
     """
     delays = [5.0, 20.0, 60.0]
     for attempt in range(attempts):
@@ -164,12 +142,10 @@ def query_candidates(
 ) -> pd.DataFrame:
     """Page through query_objects until we have n *distinct* objects of one class.
 
-    ALeRCE returns one row per classifier *version*, so the same oid comes back
-    more than once with different probabilities. Deduplicating matters: the same
-    object landing in both the train and test split would leak, and quietly
-    inflate every accuracy number we report against the baseline. We keep the
-    highest probability per object -- that is the baseline's best call on it,
-    which is the number benchmark.py should have to beat.
+    ALeRCE returns one row per classifier VERSION, so the same oid comes back
+    several times. Deduplicating matters: one object in both the train and test
+    split would leak and inflate every number. Keeping the highest probability
+    leaves benchmark.py the baseline's best call to beat.
     """
     pages = []
     page = 1
@@ -213,17 +189,11 @@ def query_candidates(
 def earliest_candids(client: Alerce, oid: str, limit: int = 5):
     """Candids of an object's earliest detections, oldest first.
 
-    ALeRCE's stamp_classifier scores the FIRST alert -- that is what an early
-    classifier is for. But get_stamps() without a candid returns an inconsistent
-    epoch: measured across 8 objects, 4 gave the first detection, 2 the second,
-    and 2 the LAST. For a supernova the last epoch can be near peak, far easier
-    to classify than a marginal first detection, which would hand us an
-    advantage ALeRCE never had.
-
-    We return several because stamps are not stored for every alert -- asking
-    for the true first candid fails ~40% of the time with a JSON error where the
-    FITS should be. Walking forward from the earliest gives the closest epoch
-    that actually exists.
+    get_stamps() without a candid returns an inconsistent epoch: across 8
+    objects, 4 gave the first detection, 2 the second and 2 the LAST. A last
+    epoch near peak is far easier than a marginal first detection, which would
+    hand us an advantage ALeRCE never had. Several are returned because the
+    true first candid has no stored stamps ~40% of the time.
     """
     det = _retry(client.query_detections, oid, survey="ztf", format="pandas")
     if det is None or len(det) == 0:
@@ -234,9 +204,9 @@ def earliest_candids(client: Alerce, oid: str, limit: int = 5):
 def fetch_stamp_array(client: Alerce, oid: str, candid=None) -> np.ndarray:
     """Download one object's cutouts as a [3, 63, 63] float32 array.
 
-    Raises ValueError if the cutouts are the wrong size or a channel is missing
-    -- both happen for real (objects near a CCD edge get truncated stamps), and
-    a silently misshapen array would blow up much later inside the model.
+    Raises if a cutout is the wrong size or a channel is missing: objects near
+    a CCD edge get truncated stamps, and a misshapen array would blow up far
+    later, inside the model.
     """
     if candid is None:
         hdul = _retry(client.get_stamps, oid, survey="ztf")
@@ -259,11 +229,9 @@ def fetch_stamp_array(client: Alerce, oid: str, candid=None) -> np.ndarray:
         if plane.shape != (STAMP_SIZE, STAMP_SIZE):
             raise ValueError(f"{channel} is {plane.shape}, expected "
                              f"({STAMP_SIZE}, {STAMP_SIZE})")
-        # FITS is big-endian (>f4); torch.from_numpy rejects that, so convert
-        # to native-endian float32 once here rather than in the training loop.
+        # FITS is big-endian (>f4) and torch.from_numpy rejects that
         plane = np.asarray(plane, dtype=np.float32)
-        # Collapse null-padding sentinels and infinities into NaN so that
-        # "missing" is a single thing train.py has to handle.
+        # sentinels and infinities -> NaN, so "missing" is one thing to train.py
         plane[~np.isfinite(plane) | (plane < SENTINEL_THRESHOLD)] = np.nan
         planes.append(plane)
 
@@ -273,10 +241,9 @@ def fetch_stamp_array(client: Alerce, oid: str, candid=None) -> np.ndarray:
 def merge_manifest(new: pd.DataFrame, path: Path) -> pd.DataFrame:
     """Merge into any existing manifest instead of overwriting it.
 
-    A throttled rerun once replaced a manifest that had 94% of its p_sn values
-    with one that had 6%, losing hours of good data. A partial run must never be
-    able to destroy a better earlier one: rows are unioned on oid, and for each
-    object a real p_sn always beats a NaN.
+    A throttled rerun once replaced a manifest 94% full of p_sn values with one
+    at 6%. Rows are unioned on oid and a real p_sn always beats a NaN, so a
+    partial run cannot destroy a better earlier one.
     """
     if not path.exists() or new.empty:
         return new
@@ -332,9 +299,8 @@ def fetch_one(oid: str, stamp_dir: Path, out_dir: Path, overwrite: bool,
         return None, (oid, f"{type(exc).__name__}: {exc}")
 
     failure = None
-    # p_sn is a property of the object, not of which epoch's stamp we fetched,
-    # so a value from an earlier run is still valid -- and skipping the call
-    # removes a third of the requests on a re-fetch
+    # p_sn belongs to the object, not to the epoch fetched, so a value from an
+    # earlier run is still valid -- skipping it cuts a third of a re-fetch
     cached = known_p_sn.get(oid) if known_p_sn else None
     if cached is not None:
         p_sn, p_sn_version = cached
@@ -362,10 +328,9 @@ def fetch_many(oids, stamp_dir: Path, out_dir: Path, overwrite: bool,
                known_p_sn: dict | None = None) -> tuple[list, list]:
     """Fetch a list of oids concurrently.
 
-    Measured: a single request takes ~2.3s regardless of load, and 8 threads
-    give ~6.5x throughput with no extra failures -- so this is latency-bound,
-    not server-throttled. 8 is a deliberate ceiling; ALeRCE is a free public
-    service and there is no reason to lean on it harder.
+    A request takes ~2.3s regardless of load and 8 threads give ~6.5x
+    throughput, so this is latency-bound. 8 is a deliberate ceiling: ALeRCE is
+    a free public service.
     """
     oids = list(oids)
     rows, failures = [], []
@@ -390,16 +355,14 @@ def query_unfiltered(client: Alerce, mjd_start: float, mjd_end: float, n: int,
                      window_days: float = 15.0) -> pd.DataFrame:
     """Objects first detected across a date range, with NO classifier filter.
 
-    This is the honest evaluation sample. Everything else in this file queries
-    by `classifier="stamp_classifier", class_name=...`, which means we only ever
-    see objects the baseline already committed to -- never the supernovae it
-    missed, and only its confident rejects as negatives. A model cannot be
-    fairly measured on a sample its competitor selected.
+    The honest evaluation sample. Everything else here queries by class_name,
+    which only returns objects the baseline already committed to -- never the
+    supernovae it missed -- and a model cannot be fairly measured on a sample
+    its competitor selected.
 
-    The range is walked as several narrow windows rather than one wide query:
-    a single multi-year span makes the API time out with a 504, and spreading
-    the sample over time also stops the model learning detector-epoch quirks
-    instead of what a transient looks like.
+    Walked as several narrow windows because one multi-year span 504s, and
+    spreading the sample over time also keeps the model off detector-epoch
+    quirks.
     """
     if windows < 1:
         windows = 1
@@ -584,15 +547,11 @@ def query_hard_negatives(client: Alerce, n: int, min_span: float = 365.0,
                          first_end: float = 60000.0) -> pd.DataFrame:
     """Objects detected across more than a year -- confident hard negatives.
 
-    A supernova fades in weeks to months. Anything ZTF has kept detecting for
-    over a year is physically not one: it is a variable star, an AGN, or a
-    recurring artifact. That verdict comes from ZTF's own detection history,
-    NOT from any classifier, so unlike ALeRCE's class labels it is non-circular.
-
-    These are the negatives our stream sample is short of -- 80% of that sample
-    is single-detection junk, which is easy. AGN and variable stars are the
-    genuinely hard cases, and they are what the model actually confuses with
-    supernovae.
+    A supernova fades in weeks to months, so anything ZTF has kept detecting
+    for over a year is physically not one. That verdict comes from the
+    detection history rather than any classifier, so unlike ALeRCE's class
+    labels it is non-circular -- and these are the genuinely hard negatives the
+    stream sample is short of.
     """
     starts = np.linspace(first_start, first_end - window_days, windows)
     collected, seen = [], set()
@@ -643,12 +602,10 @@ def build_hard_negatives(n: int, out_dir: Path, overwrite: bool = False,
                          first_detection: bool = False) -> pd.DataFrame:
     """Fetch long-span objects as hard negatives, excluding any confirmed SN.
 
-    Use first_detection to match the positives. The positives are pinned to
-    their first alert, which for a supernova is typically its faintest epoch;
-    if the negatives came from arbitrary epochs -- often brighter, since a
-    long-span variable gets sampled anywhere in its cycle -- the model could
-    learn "faint means supernova". That would be a fresh shortcut replacing the
-    one the epoch fix just removed.
+    Use first_detection to match the positives, which are pinned to their first
+    and typically faintest alert. Negatives from arbitrary (often brighter)
+    epochs would teach the model "faint means supernova" -- a fresh shortcut
+    replacing the one the epoch fix removed.
     """
     client = Alerce()
     stamp_dir = out_dir / ("stamps_first" if first_detection else "stamps")
@@ -725,9 +682,8 @@ def build_unfiltered(mjd_start: float, mjd_end: float, n: int, out_dir: Path,
                                 workers, "stamps[unfiltered]")
     manifest = pd.DataFrame(rows)
     if not manifest.empty:
-        # keep the query metadata: lastmjd-firstmjd is what identifies the
-        # physically-confident hard negatives (an object detected across years
-        # cannot be a supernova)
+        # keep lastmjd/firstmjd: the span identifies hard negatives, since an
+        # object detected across years cannot be a supernova
         meta = candidates[["oid", "meanra", "meandec", "ndet",
                            "firstmjd", "lastmjd"]].rename(
             columns={"meanra": "ra", "meandec": "dec"})
@@ -755,16 +711,14 @@ def build_from_oids(oid_file: Path, n: int, out_dir: Path, name: str,
                     seed: int = 0, workers: int = 8,
                     first_detection: bool = False,
                     reuse_p_sn: Path | None = None) -> pd.DataFrame:
-    """Fetch stamps for an explicit list of oids -- e.g. TNS-confirmed supernovae.
+    """Fetch stamps for an explicit list of oids, e.g. TNS-confirmed supernovae.
 
-    This inverts the pipeline. Instead of asking ALeRCE which objects it thinks
-    are supernovae (and inheriting its mistakes as labels), we start from
-    spectroscopically confirmed truth and go fetch those images.
+    Inverts the pipeline: start from spectroscopically confirmed truth instead
+    of asking ALeRCE what it thinks and inheriting its mistakes as labels.
     """
     client = Alerce()
-    # first-detection stamps go in their own directory: they are a different
-    # epoch of the same object, so writing them over the existing ones would
-    # destroy the ability to compare the two and re-run the old benchmark
+    # first-detection stamps get their own directory: a different epoch of the
+    # same object, so overwriting would make the old benchmark unreproducible
     stamp_dir = out_dir / ("stamps_first" if first_detection else "stamps")
     stamp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -772,7 +726,7 @@ def build_from_oids(oid_file: Path, n: int, out_dir: Path, name: str,
     if only_label is not None and "tns_label" in wanted.columns:
         wanted = wanted[wanted.tns_label == only_label]
     wanted = wanted.drop_duplicates("oid")
-    # sample rather than take the head: the file is ordered by TNS name, so the
+    # sample, don't take the head: the file is ordered by TNS name, so the
     # first N would all be from the earliest discovery years
     if len(wanted) > n:
         wanted = wanted.sample(n, random_state=seed)

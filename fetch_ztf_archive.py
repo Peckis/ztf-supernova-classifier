@@ -1,21 +1,13 @@
 """Build a negative set straight from ZTF's public alert archive.
 
-Why this instead of the ALeRCE API: the archive publishes one tarball per night
-containing every alert as an Avro packet, and the three cutouts are *inside the
-packet*. So one sequential download replaces tens of thousands of individual
-HTTP requests -- the API crawl was running at 26s/object with a 19% failure
-rate and a 54-hour ETA, because every failure burned retry backoff.
-
-It is also a better sample scientifically. ZTF describes these files as "a full,
-unfiltered, 5-sigma alert stream": no broker has selected anything. Querying
-ALeRCE by date still went through a broker's database; this does not.
+One nightly tarball carries every alert with its cutouts inside the packet, so
+a sequential download replaces tens of thousands of API requests, and nothing
+has been through a broker's selection first.
 
     python fetch_ztf_archive.py --date 20260801 --n 20000
-    python fetch_ztf_archive.py --tarball ztf_public_20260801.tar.gz --n 20000
 
-Tarballs are 5-15 GB (occasionally 33 GB), so run this where there is disk.
-The archive only reaches back to early 2025 -- historical TNS supernovae still
-have to come from the ALeRCE API by object id.
+Tarballs are 5-15 GB (occasionally 33 GB) and reach back only to early 2025;
+historical TNS supernovae still come from the ALeRCE API by object id.
 """
 
 from __future__ import annotations
@@ -49,22 +41,17 @@ CUTOUTS = ("cutoutScience", "cutoutTemplate", "cutoutDifference")
 def download(date: str, dest: Path) -> Path:
     """Stream the nightly tarball to disk, atomically.
 
-    Downloads to a .part file and renames only after the byte count matches
-    Content-Length. This matters more than it looks: a tarball truncated by a
-    power cut is still a *readable* gzip stream, so iter_packets would parse the
-    first fraction of the night, stop cleanly at the damage, and ingest_night
-    would record the night as done. Gap detection would then never revisit it --
-    silent, permanent data loss. A file only gets its final name once it is
-    known to be whole.
+    A truncated tarball is still a readable gzip stream, so iter_packets would
+    parse part of the night, stop cleanly, and ingest_night would record the
+    night as done -- silent data loss. Hence .part until the byte count
+    matches Content-Length.
     """
     url = f"{ARCHIVE}/ztf_public_{date}.tar.gz"
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
 
     if dest.exists():
-        # Trust a cached file only if it is the right size. A partial download
-        # from before the .part scheme -- or any truncation -- is still valid
-        # gzip, so it would be parsed as a short but "complete" night.
+        # trust a cached file only at the right size, for the reason above
         have = dest.stat().st_size
         try:
             expect = int(requests.head(url, timeout=60).headers
@@ -79,8 +66,7 @@ def download(date: str, dest: Path) -> Path:
             print(f"{dest} already present ({have / 1e9:.1f} GB), reusing")
             return dest
     if part.exists():
-        # the archive does not support range requests, so there is nothing to
-        # resume from -- start over rather than build on an unknown prefix
+        # no range requests on the archive, so there is nothing to resume from
         print(f"discarding incomplete {part.name} from an interrupted run")
         part.unlink()
 
@@ -112,17 +98,13 @@ def download(date: str, dest: Path) -> Path:
 
 
 def cutout_to_array(cutout) -> np.ndarray:
-    """One packet cutout -> a 63x63 float32 plane.
-
-    The packet stores each cutout as gzipped FITS bytes under stampData.
-    """
+    """One packet cutout -> a 63x63 float32 plane (gzipped FITS in stampData)."""
     raw = gzip.decompress(cutout["stampData"])
     with fits.open(io.BytesIO(raw), memmap=False) as hdul:
         data = hdul[0].data
     plane = np.asarray(data, dtype=np.float32)
-    # same missing-data normalisation as fetch_data.py: ZTF marks gaps as NaN in
-    # some planes and as -FLT_MAX padding in others, and a finite -3.4e38 would
-    # sail into the network and blow up the loss
+    # ZTF marks gaps as NaN in some planes and -FLT_MAX padding in others, and
+    # a finite -3.4e38 would sail into the network and blow up the loss
     plane[~np.isfinite(plane) | (plane < SENTINEL_THRESHOLD)] = np.nan
     return plane
 
@@ -144,8 +126,7 @@ def packet_to_stamp(packet) -> np.ndarray:
 def iter_packets(tarball: Path):
     """Stream Avro packets out of the tarball without extracting it.
 
-    Uses streaming mode ('r|gz') so a 15 GB archive never has to be unpacked to
-    disk or held in memory.
+    Streaming mode ('r|gz'), so a 15 GB archive is never unpacked or held.
     """
     from fastavro import reader as avro_reader
 
@@ -181,8 +162,7 @@ def build(tarball: Path, n: int, out_dir: Path, name: str,
     for packet in iter_packets(tarball):
         if len(rows) >= n:
             break
-        # thin the stream so the sample is spread across the whole night rather
-        # than being the first N alerts, which would all be one patch of sky
+        # thin the stream: the first N alerts would all be one patch of sky
         if sample_rate < 1.0 and rng.random() > sample_rate:
             continue
 
@@ -204,8 +184,7 @@ def build(tarball: Path, n: int, out_dir: Path, name: str,
         rows.append({
             "oid": oid,
             "candid": packet.get("candid"),
-            # no p_sn: this is the raw stream, no broker has scored it. Join
-            # ALeRCE probabilities later only if benchmarking needs them.
+            # no p_sn: raw stream, no broker has scored it
             "p_sn": float("nan"),
             "ra": c.get("ra"),
             "dec": c.get("dec"),

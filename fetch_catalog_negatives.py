@@ -1,18 +1,11 @@
 """Hard negatives from external catalogues: known AGN and variable stars.
 
-Why: our negatives are ~80% single-detection stream junk, which is easy. A
-nuisance-only model (5 photometric numbers, no image) already reaches AUC 0.92
-on this data, meaning the classes differ in brightness and environment as much
-as in being supernovae. AGN and variable stars fix that -- they are point
-sources, often bright, often sitting on galaxies, i.e. the cases genuinely
-confusable with a supernova.
+Stream negatives are ~80% single-detection junk, which is easy; a nuisance-only
+model reaches AUC 0.92 on them (see audit_shortcuts.py). AGN and variable stars
+are the genuinely confusable cases, and their labels come from catalogues
+rather than any alert classifier, so they stay non-circular like TNS labels do.
 
-Crucially these labels come from spectroscopic/photometric catalogues
-(Milliquas, AAVSO VSX), not from any alert classifier, so they stay
-non-circular in exactly the way TNS labels do.
-
-Two stages, because stage 2 competes with other fetches for the ALeRCE rate
-limit and stage 1 does not touch ALeRCE at all:
+Two stages, because only the second competes for the ALeRCE rate limit:
 
     python fetch_catalog_negatives.py positions --n 8000
     python fetch_catalog_negatives.py fetch --n 6000 --workers 3 --rate 2
@@ -51,9 +44,8 @@ def sample_positions(n_per_class: int, patches: int, radius_deg: float,
                      seed: int, only: list[str] | None = None) -> pd.DataFrame:
     """Cone-search several random sky patches and pool the results.
 
-    Sampling patches rather than taking the catalogue's first N rows matters:
-    these catalogues are ordered by position, so the head of the table is one
-    small region of sky with its own extinction and crowding.
+    Not the catalogue's first N rows: these tables are ordered by position, so
+    the head of one is a single region with its own extinction and crowding.
     """
     from astropy import units as u
     from astropy.coordinates import SkyCoord
@@ -145,15 +137,9 @@ def resolve_to_oids(positions: pd.DataFrame, radius_arcsec: float,
 def label_existing(manifest_path: Path, radius_arcsec: float) -> int:
     """Name the hard negatives we already have by crossmatching them outward.
 
-    This is the efficient direction. Going catalogue -> ZTF wastes most of the
-    catalogue: only 12% of Milliquas AGN and 32% of VSX variables ever vary
-    enough to trigger a 5-sigma ZTF alert, so the yield is terrible. Going
-    ZTF -> catalogue keeps every object we already paid to fetch, and anything
-    without a match simply stays an unlabelled hard negative rather than being
-    thrown away.
-
-    Uses the CDS X-Match service, which does the whole table in one request
-    instead of one query per object.
+    The efficient direction: only 12% of Milliquas AGN and 32% of VSX
+    variables ever trigger a ZTF alert, so catalogue -> ZTF wastes most of the
+    catalogue, while ZTF -> catalogue keeps every object already paid for.
     """
     from astropy import units as u
     from astropy.table import Table
@@ -220,8 +206,7 @@ def main():
             sys.exit("no catalogue positions retrieved")
         DATA.mkdir(exist_ok=True)
         if POSITIONS.exists():
-            # accumulate across runs -- AGN are sparser than variable stars, so
-            # getting a usable number of them takes several passes
+            # accumulate across runs: AGN are sparse enough to need several
             old = pd.read_csv(POSITIONS)
             pos = (pd.concat([old, pos], ignore_index=True)
                      .drop_duplicates(subset=["ra", "dec"]))

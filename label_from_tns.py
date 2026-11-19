@@ -1,27 +1,12 @@
-"""Phase 2, step 2: fill in ground truth as TNS confirms it.
+"""Fill in ground truth as TNS confirms it, days to weeks after ingest.
 
-This is the delayed-label half of the continual-learning loop. ingest_night.py
-scored these alerts when they arrived; over the following days and weeks TNS
-publishes spectroscopic classifications for a few of them, and this job joins
-those back onto the stored predictions.
+Labels are applied per OBJECT, not per alert, and rewritten whenever the type
+has changed, since an unclassified AT becomes "SN Ia" weeks later.
 
     python label_from_tns.py --delta 20260814   # one day's changes (nightly)
     python label_from_tns.py --full             # whole catalogue (backfill)
-    python label_from_tns.py --csv local.csv    # a file already on disk
 
-TNS publishes daily delta files retained for two weeks, so the nightly path
-stays small. Use --full to backfill or to recover after a gap longer than that.
-
-Labels are applied per OBJECT, not per alert: one oid can have many alerts
-across many nights, and a spectrum classifies the object, so every row for that
-oid gets the same truth.
-
-Types get revised -- an unclassified AT becomes "SN Ia" weeks later, and
-occasionally a classification is corrected. Rows are therefore updated whenever
-the type has changed, not only when they are currently NULL.
-
-Requires the TNS credentials used by fetch_tns.py:
-    TNS_BOT_ID, TNS_BOT_NAME, TNS_API_KEY
+Needs TNS_BOT_ID, TNS_BOT_NAME, TNS_API_KEY.
 """
 
 from __future__ import annotations
@@ -62,17 +47,15 @@ def tns_rows_for_known_oids(tns: pd.DataFrame, known: set[str]) -> pd.DataFrame:
 
 
 def apply_labels(conn: sqlite3.Connection, rows: pd.DataFrame) -> dict:
-    """Write labels onto every alert belonging to each labelled object."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     prev = pd.read_sql(
         "SELECT oid, tns_name, tns_type FROM alerts GROUP BY oid", conn
     ).set_index("oid")
 
     def clean(v):
-        """SQLite NULL comes back from pandas as NaN, while an unclassified TNS
-        row gives None. Comparing them directly is always False, so every
-        untyped object looked 'revised' on every run -- and nightly.sh replays a
-        week of deltas, so that was thousands of pointless writes a night."""
+        """SQLite NULL arrives as NaN, an unclassified TNS row gives None.
+        Comparing them is always False, so every untyped object looked
+        'revised' on every run -- thousands of pointless writes a night."""
         return None if v is None or (isinstance(v, float) and pd.isna(v)) else v
 
     existing = {k: clean(v) for k, v in prev.tns_type.to_dict().items()}
@@ -82,10 +65,8 @@ def apply_labels(conn: sqlite3.Connection, rows: pd.DataFrame) -> dict:
     for r in rows.itertuples():
         before = existing.get(r.oid)
         after = clean(r.tns_type if isinstance(r.tns_type, str) else None)
-        # Compare the NAME too, not just the type. An object reported to TNS but
-        # not yet classified has type NULL on both sides, so a type-only check
-        # skips it -- and we would never record that it had been reported at
-        # all, which is exactly the population we are waiting on spectra for.
+        # compare the NAME too: an object reported but not yet classified has
+        # type NULL on both sides, and that is the population we are waiting on
         if before == after and existing_name.get(r.oid) == r.tns_name:
             continue
         if before is None and after is not None:
@@ -105,24 +86,19 @@ def apply_labels(conn: sqlite3.Connection, rows: pd.DataFrame) -> dict:
 
 def fetch_missing_p_sn(conn: sqlite3.Connection, limit: int, rate: float,
                        workers: int, control_per_night: int = 300) -> int:
-    """Get ALeRCE's baseline score, but only for objects that now have truth.
+    """Get ALeRCE's baseline score for objects that now have truth.
 
-    Deliberately not fetched at ingest time: 55,000 alerts a night would be
-    hours of API calls. The accuracy plot only ever compares the two models on
-    LABELLED objects, and TNS confirms a handful per night, so this stays cheap.
+    Not fetched at ingest time: 55,000 alerts a night would be hours of API
+    calls, and the comparison only ever uses labelled objects and controls.
     """
-    # Labelled objects first -- they are the positives and always worth having.
     todo = pd.read_sql(
         "SELECT DISTINCT oid FROM alerts "
         "WHERE tns_label IS NOT NULL AND p_sn IS NULL LIMIT ?",
         conn, params=(limit,))
 
-    # Then top up with control objects. The dashboard scores both models on
-    # confirmed supernovae versus presumed-negative controls, so the baseline
-    # needs an opinion on the controls too -- otherwise the two curves get
-    # measured on different populations and the comparison is meaningless.
-    # Same deterministic per-night pick the dashboard uses, so the p_sn we
-    # fetch is for the objects it will actually evaluate.
+    # The dashboard scores both models on confirmed SNe versus controls, so the
+    # baseline needs an opinion on the controls too -- otherwise the two curves
+    # get measured on different populations. Same deterministic per-night pick.
     spare = limit - len(todo)
     if spare > 0:
         controls = pd.read_sql("""
@@ -183,9 +159,6 @@ def summarise(conn: sqlite3.Connection) -> None:
         "WHERE tns_name IS NOT NULL AND tns_label IS NULL", conn).n[0]
     print(f"  in TNS, untyped   : {untyped:,}  (reported, no spectrum yet)")
 
-    # Only meaningful once the nightly delta job is running, where labelled_at
-    # tracks when TNS published the classification. On a --full backfill it just
-    # measures how long ago the alert was, so it is reported as such.
     lag = pd.read_sql(
         "SELECT AVG(julianday(labelled_at) - jd) d FROM alerts "
         "WHERE tns_label IS NOT NULL AND jd IS NOT NULL", conn).d[0]
